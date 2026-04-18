@@ -15,6 +15,7 @@ from masker import (
     filter_output,
 )
 from masker.detection import detect
+from masker.gemma_wrapper import _extract_assistant_reply
 from masker.masking import mask, scrub_output
 from masker.policy import decide
 from masker.router import Router
@@ -79,6 +80,39 @@ class PublicApiTests(unittest.TestCase):
     def test_filter_output_scrubs_leaked_email(self):
         out = filter_output("Reach me at jane@example.com")
         self.assertNotIn("jane@example.com", out)
+
+
+class CactusOutputParserTests(unittest.TestCase):
+    """The cactus chat binary mixes banner, prompt echo, reply, and metrics
+    into a single stdout. These tests pin the parser against real samples.
+    """
+
+    SAMPLE = """\
+Loading model from /weights/functiongemma-270m-it...
+Model loaded successfully!
+============================================================
+           🌵 CACTUS CHAT INTERFACE 🌵
+============================================================
+You: Reply with the single word: hello
+Assistant: I am sorry, I am unable to assist with this request.
+My capabilities are limited.
+[40 tokens | latency: 0.029s | total: 0.437s | 91 tok/s | RAM: 125.1 MB]
+------------------------------------------------------------
+You:
+👋 Goodbye!
+"""
+
+    def test_extracts_multiline_reply_and_drops_metrics(self):
+        reply = _extract_assistant_reply(self.SAMPLE)
+        self.assertIn("I am sorry", reply)
+        self.assertIn("My capabilities are limited.", reply)
+        self.assertNotIn("tokens", reply)
+        self.assertNotIn("Goodbye", reply)
+        self.assertNotIn("CACTUS", reply)
+
+    def test_falls_back_when_marker_missing(self):
+        reply = _extract_assistant_reply("hello world\n[done]")
+        self.assertIn("hello world", reply)
 
 
 class VoiceLoopTests(unittest.TestCase):

@@ -41,16 +41,25 @@ print(result.safe_output)
 ## Running the demo
 
 ```bash
-# Zero-setup, runs the four BACKLOG scenarios with the stub LLM:
+# Zero-setup, runs the four BACKLOG scenarios with the stub LLM (<1ms each):
 python -m masker.demo
 
-# Once you've sourced the cactus venv and downloaded functiongemma:
+# Real Gemma 4 on Cactus (~1-2s per turn warm):
+source ../cactus/venv/bin/activate
 python -m masker.demo --backend cactus
 
 # With a Gemini API key for cloud routes:
 export GEMINI_API_KEY=...
 python -m masker.demo --backend gemini
+
+# Auto-pick the best backend available in the current env:
+python -m masker.demo --backend auto
 ```
+
+The Cactus backend shells out to `cactus run <model> --prompt <text>`, sends
+an empty stdin line to satisfy the optional Cactus Cloud key prompt, and
+parses the model's reply out of the chat binary's mixed stdout. No
+persistent session — each turn pays the model-load cost (~0.5s warm).
 
 ## Tests
 
