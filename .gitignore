@@ -30,3 +30,8 @@ dist/
 
 # Cactus model weights are pulled via `cactus download`; never commit
 weights/
+
+# Node / UI
+node_modules/
+ui/dist/
+ui/.vite/
