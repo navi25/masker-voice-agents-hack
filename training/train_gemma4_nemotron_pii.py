@@ -20,22 +20,14 @@ from trl import SFTConfig, SFTTrainer
 from transformers import TrainerCallback
 from unsloth import FastModel
 
-# ─── Defaults ─────────────────────────────────────────────────────────────────
-
-MODEL_NAME = "unsloth/gemma-4-E4B-it"
-DATASET_NAME = "nvidia/Nemotron-PII"
-DEFAULT_OUTPUT_DIR = "outputs/gemma4-pii"
-DEFAULT_MAX_HOURS = 2.0
-MAX_SEQ_LENGTH = 2048
-LORA_RANK = 16
-
-SYSTEM_PROMPT = (
-    "You are a privacy intelligence expert. "
-    "Identify and tag every PII/PHI entity in the input text. "
-    'Wrap each entity with <PII type="entity_type">value</PII> tags. '
-    "Common types: name, email, phone, ssn, address, dob, mrn, "
-    "insurance_id, account_number, credit_card, passport, ip_address, "
-    "url, organization, username, npi, license_number."
+from config import (
+    MODEL_NAME, DATASET_NAME, DEFAULT_OUTPUT_DIR, GGUF_STEM,
+    DEFAULT_MAX_HOURS, NUM_TRAIN_EPOCHS,
+    MAX_SEQ_LENGTH, LORA_RANK, LORA_ALPHA_MULTIPLIER, LORA_TARGET_MODULES,
+    DEFAULT_BATCH_SIZE, DEFAULT_GRAD_ACCUM, DEFAULT_LR,
+    WARMUP_STEPS, LR_SCHEDULER,
+    LOGGING_STEPS, SAVE_STEPS, SAVE_TOTAL_LIMIT, DATASET_NUM_PROC,
+    SYSTEM_PROMPT,
 )
 
 
@@ -104,9 +96,9 @@ def main():
     parser.add_argument("--max-hours", type=float, default=DEFAULT_MAX_HOURS)
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--lora-rank", type=int, default=LORA_RANK)
-    parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--grad-accum", type=int, default=4)
-    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--grad-accum", type=int, default=DEFAULT_GRAD_ACCUM)
+    parser.add_argument("--lr", type=float, default=DEFAULT_LR)
     parser.add_argument("--no-gguf", action="store_true",
                         help="Skip GGUF export (faster, still saves LoRA)")
     args = parser.parse_args()
@@ -125,11 +117,8 @@ def main():
     model = FastModel.get_peft_model(
         model,
         r=args.lora_rank,
-        lora_alpha=args.lora_rank * 2,
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
+        lora_alpha=args.lora_rank * LORA_ALPHA_MULTIPLIER,
+        target_modules=LORA_TARGET_MODULES,
         lora_dropout=0,
         bias="none",
         use_gradient_checkpointing="unsloth",
@@ -151,18 +140,17 @@ def main():
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.grad_accum,
             max_seq_length=MAX_SEQ_LENGTH,
-            # Use a high epoch count; TimeLimitCallback stops us at 2 h
-            num_train_epochs=10,
+            num_train_epochs=NUM_TRAIN_EPOCHS,
             learning_rate=args.lr,
-            warmup_steps=20,
-            lr_scheduler_type="cosine",
+            warmup_steps=WARMUP_STEPS,
+            lr_scheduler_type=LR_SCHEDULER,
             bf16=use_bf16,
             fp16=not use_bf16,
-            logging_steps=10,
-            save_steps=100,
-            save_total_limit=3,
+            logging_steps=LOGGING_STEPS,
+            save_steps=SAVE_STEPS,
+            save_total_limit=SAVE_TOTAL_LIMIT,
             dataset_text_field="text",
-            dataset_num_proc=4,
+            dataset_num_proc=DATASET_NUM_PROC,
             report_to="none",
         ),
         callbacks=[TimeLimitCallback(max_seconds)],
@@ -179,7 +167,7 @@ def main():
 
     # ── Export GGUF for Cactus ─────────────────────────────────────────────────
     if not args.no_gguf:
-        gguf_prefix = f"{out}/gemma4-pii"
+        gguf_prefix = f"{out}/{GGUF_STEM}"
         print(f"Exporting Q4_K_M GGUF → {gguf_prefix}-unsloth.Q4_K_M.gguf …")
         model.save_pretrained_gguf(
             gguf_prefix,
