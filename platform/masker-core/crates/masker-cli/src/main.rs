@@ -350,6 +350,86 @@ enum Command {
         stream_output: bool,
     },
 
+    /// Default speech-to-text flow for Masker.
+    ///
+    /// This mirrors the cactus `transcribe` experience (record from mic or read
+    /// a file), but keeps Masker privacy behavior on by default:
+    /// - automatic detection model loading when available
+    /// - live redaction/masking updates while recording from mic
+    /// - fallback regex detection if model loading/inference fails
+    ///
+    /// For `--audio-file`, this command prints the final redacted transcript.
+    Transcribe {
+        /// Session identifier for audit grouping.
+        #[arg(long, default_value = "ses_transcribe")]
+        session: String,
+
+        /// Optional API key to select client policy. Defaults to HIPAA-base.
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Use an existing audio file instead of recording from the mic.
+        #[arg(long)]
+        audio_file: Option<PathBuf>,
+
+        /// How long to record from the mic when --audio-file is not provided.
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+
+        /// Record from the microphone until Enter is pressed.
+        #[arg(long, default_value_t = false)]
+        interactive: bool,
+
+        /// Raw ffmpeg avfoundation input selector for the microphone.
+        #[arg(long, default_value = ":0")]
+        input: String,
+
+        /// Override the STT model path for this run. Falls back to
+        /// CACTUS_STT_MODEL_PATH.
+        #[arg(long)]
+        stt_model_path: Option<String>,
+
+        /// Use a built-in STT preset instead of a full model path.
+        #[arg(long, value_enum, conflicts_with = "stt_model_path")]
+        stt: Option<SttPreset>,
+
+        /// Select the STT engine: dedicated STT (default) or Gemma-audio prompted ASR.
+        #[arg(long, value_enum, default_value_t = LiveSttEngine::Cactus)]
+        stt_engine: LiveSttEngine,
+
+        /// Override the Gemma STT model path for this run.
+        /// Falls back to CACTUS_GEMMA_STT_MODEL_PATH, then CACTUS_DETECTION_MODEL_PATH,
+        /// then CACTUS_MODEL_PATH.
+        #[arg(long)]
+        gemma_stt_model_path: Option<String>,
+
+        /// Override the detection model path for this run. Falls back to
+        /// CACTUS_DETECTION_MODEL_PATH, then CACTUS_MODEL_PATH.
+        #[arg(long)]
+        detection_model_path: Option<String>,
+
+        /// Use a built-in detection preset instead of a full model path.
+        #[arg(long, value_enum, conflicts_with = "detection_model_path")]
+        detect: Option<DetectionPreset>,
+
+        /// Keep the captured raw PCM file on disk after processing.
+        #[arg(long, default_value_t = false)]
+        keep_audio: bool,
+
+        /// Play the captured input audio after processing.
+        #[arg(long, default_value_t = false)]
+        play_input: bool,
+
+        /// Play local output audio: original audio for safe spans, spoken
+        /// redactions only where sensitive content was detected.
+        #[arg(long, default_value_t = false)]
+        play_output: bool,
+
+        /// How to render the result.
+        #[arg(long, value_enum, default_value_t = LiveOutputFormat::Human)]
+        output: LiveOutputFormat,
+    },
+
     /// Recover a vault token (tok_...) back to its original plaintext.
     ///
     /// Requires:
@@ -742,7 +822,9 @@ fn pcm_signal_stats(bytes: &[u8]) -> PcmSignalStats {
 }
 
 #[cfg(feature = "cactus")]
-fn build_live_pipeline(stt: Arc<dyn masker::SttBackend>) -> Result<(StreamingPipeline, LiveDetectionStatus)> {
+fn build_live_pipeline(
+    stt: Arc<dyn masker::SttBackend>,
+) -> Result<(StreamingPipeline, LiveDetectionStatus)> {
     let tts = Arc::new(masker::StubTts);
     let requested_model_path = std::env::var("CACTUS_DETECTION_MODEL_PATH")
         .ok()
@@ -973,7 +1055,11 @@ fn print_live_human_summary(
     println!("{bar}");
     println!("{}", term_fg_bold("MASKER LIVE SUMMARY", TermColor::Cyan));
     println!("{bar}");
-    println!("{} {}", term_dim("Session   :"), term_fg_bold(session, TermColor::Cyan));
+    println!(
+        "{} {}",
+        term_dim("Session   :"),
+        term_fg_bold(session, TermColor::Cyan)
+    );
 
     let route = match result.route {
         Route::LocalOnly => term_fg_bold(result.route.as_str(), TermColor::Magenta),
@@ -1868,24 +1954,30 @@ fn run_command(command: Command) -> Result<i32> {
                     LiveOutputFormat::Human => {
                         print_live_human_summary(
                             &session,
-                        &result,
-                        total_ms,
-                        signal,
-                        duration_ms,
-                        &detection_status,
-                        match stt_engine {
-                            LiveSttEngine::Cactus => std::env::var("CACTUS_STT_MODEL_PATH").ok(),
-                            LiveSttEngine::Gemma4 => std::env::var("CACTUS_GEMMA_STT_MODEL_PATH")
-                                .ok()
-                                .or_else(|| std::env::var("CACTUS_DETECTION_MODEL_PATH").ok())
-                                .or_else(|| std::env::var("CACTUS_MODEL_PATH").ok()),
-                        }
-                        .as_deref(),
-                    );
-                }
-                LiveOutputFormat::Json => {
-                    println!("{}", serde_json::to_string(&result)?);
-                }
+                            &result,
+                            total_ms,
+                            signal,
+                            duration_ms,
+                            &detection_status,
+                            match stt_engine {
+                                LiveSttEngine::Cactus => {
+                                    std::env::var("CACTUS_STT_MODEL_PATH").ok()
+                                }
+                                LiveSttEngine::Gemma4 => {
+                                    std::env::var("CACTUS_GEMMA_STT_MODEL_PATH")
+                                        .ok()
+                                        .or_else(|| {
+                                            std::env::var("CACTUS_DETECTION_MODEL_PATH").ok()
+                                        })
+                                        .or_else(|| std::env::var("CACTUS_MODEL_PATH").ok())
+                                }
+                            }
+                            .as_deref(),
+                        );
+                    }
+                    LiveOutputFormat::Json => {
+                        println!("{}", serde_json::to_string(&result)?);
+                    }
                     LiveOutputFormat::PrettyJson => {
                         println!("{}", serde_json::to_string_pretty(&result)?);
                     }
@@ -1906,6 +1998,43 @@ fn run_command(command: Command) -> Result<i32> {
                 Ok(0)
             }
         }
+
+        Command::Transcribe {
+            session,
+            api_key,
+            audio_file,
+            seconds,
+            interactive,
+            input,
+            stt_model_path,
+            stt,
+            stt_engine,
+            gemma_stt_model_path,
+            detection_model_path,
+            detect,
+            keep_audio,
+            play_input,
+            play_output,
+            output,
+        } => run_command(Command::Live {
+            session,
+            api_key,
+            stream_output: audio_file.is_none(),
+            audio_file,
+            seconds,
+            interactive,
+            input,
+            stt_model_path,
+            stt,
+            stt_engine,
+            gemma_stt_model_path,
+            detection_model_path,
+            detect,
+            keep_audio,
+            play_input,
+            play_output,
+            output,
+        }),
 
         Command::Detokenize {
             token,
@@ -2033,8 +2162,16 @@ fn coremlcompiler_compile(model: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> 
 
 fn coreml_check_gemma_e2b(gemma_dir: &Path) -> Result<()> {
     let expected = [
-        ("audio_encoder", "audio_encoder.mlpackage", "audio_encoder.mlmodelc"),
-        ("vision_encoder", "vision_encoder.mlpackage", "vision_encoder.mlmodelc"),
+        (
+            "audio_encoder",
+            "audio_encoder.mlpackage",
+            "audio_encoder.mlmodelc",
+        ),
+        (
+            "vision_encoder",
+            "vision_encoder.mlpackage",
+            "vision_encoder.mlmodelc",
+        ),
         ("model", "model.mlpackage", "model.mlmodelc"),
     ];
 
@@ -2049,10 +2186,7 @@ fn coreml_check_gemma_e2b(gemma_dir: &Path) -> Result<()> {
     }
 
     if missing.is_empty() {
-        println!(
-            "OK: Core ML artifacts found under {}",
-            gemma_dir.display()
-        );
+        println!("OK: Core ML artifacts found under {}", gemma_dir.display());
         return Ok(());
     }
 
@@ -2090,7 +2224,9 @@ fn stream_live_mic_to_terminal(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| anyhow!("failed to start ffmpeg: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("failed to start ffmpeg: {e}"))?;
     let stdout = child
         .stdout
         .take()
@@ -2153,7 +2289,10 @@ fn stream_live_mic_to_terminal(
 
             match pipeline.process(session, api_key, &chunk) {
                 Ok(result) => print_live_chunk_update(&result),
-                Err(e) => eprintln!("{}", term_fg(format!("chunk {seq} error: {e:#}"), TermColor::Yellow)),
+                Err(e) => eprintln!(
+                    "{}",
+                    term_fg(format!("chunk {seq} error: {e:#}"), TermColor::Yellow)
+                ),
             }
             seq += 1;
         }
@@ -2171,7 +2310,10 @@ fn stream_live_mic_to_terminal(
         };
         match pipeline.process(session, api_key, &chunk) {
             Ok(result) => print_live_chunk_update(&result),
-            Err(e) => eprintln!("{}", term_fg(format!("chunk {seq} error: {e:#}"), TermColor::Yellow)),
+            Err(e) => eprintln!(
+                "{}",
+                term_fg(format!("chunk {seq} error: {e:#}"), TermColor::Yellow)
+            ),
         }
     }
 
@@ -2207,7 +2349,11 @@ fn print_live_chunk_update(result: &AudioChunkResult) {
     };
 
     let raw = result.raw_transcript.replace('\n', " ").trim().to_string();
-    let masked = result.masked_transcript.replace('\n', " ").trim().to_string();
+    let masked = result
+        .masked_transcript
+        .replace('\n', " ")
+        .trim()
+        .to_string();
 
     if raw.is_empty() && masked.is_empty() {
         return;
@@ -2237,7 +2383,10 @@ fn print_live_chunk_update(result: &AudioChunkResult) {
             term_fg(format_entity_list(result), TermColor::Red)
         );
     }
-    println!("{}", term_dim(format!("  ({:.0} ms)", result.processing_ms)));
+    println!(
+        "{}",
+        term_dim(format!("  ({:.0} ms)", result.processing_ms))
+    );
     println!();
 }
 

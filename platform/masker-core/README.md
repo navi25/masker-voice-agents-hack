@@ -197,6 +197,7 @@ masker filter-output --text "Sure, I saw 123-45-6789" \
   --detection-json '{"entities":[{"type":"ssn","value":"123-45-6789","start":10,"end":21,"confidence":0.9}],"risk_level":"high"}'
 masker run-turn --text "I have chest pain and MRN 99812" --backend auto --policy hipaa-clinical
 masker live --audio-file /tmp/sample.wav
+masker transcribe --interactive
 ```
 
 That lets us keep one fast privacy engine while still offering a Python-first
@@ -257,6 +258,28 @@ Notes:
 ```bash
 ffmpeg -f avfoundation -list_devices true -i ""
 ```
+
+### Default transcribe flow (Masker-first)
+
+Use `masker transcribe` when you want a cactus-like transcription command with
+Masker privacy behavior enabled by default.
+
+```bash
+# cactus-like interactive transcription with live masking/redaction updates
+cargo run --release --features cactus -p masker-cli -- transcribe --interactive
+
+# fixed-length capture with live redaction updates
+cargo run --release --features cactus -p masker-cli -- transcribe --seconds 8
+
+# transcribe a prerecorded clip and print the final redacted transcript summary
+cargo run --release --features cactus -p masker-cli -- \
+  transcribe --audio-file /tmp/sample.wav
+```
+
+`masker transcribe` reuses `masker live` plumbing and automatically turns on
+live chunk updates whenever recording from the microphone (disabled for
+`--audio-file` runs). Detection model auto-loading and regex fallback behavior
+remain the same as `masker live`.
 
 ---
 
