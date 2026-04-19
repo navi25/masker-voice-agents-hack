@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/Sidebar";
-import { createClient } from "@/lib/supabase/server";
+import { headers } from "next/headers";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
 const jetbrainsMono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono", display: "swap" });
@@ -14,45 +14,24 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = { width: "device-width", initialScale: 1 };
 
+const PUBLIC_PATHS = ["/login", "/onboarding", "/auth"];
+
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  // Fetch org for authenticated users — null on public pages (login/onboarding)
-  let orgName: string | null = null;
-  let orgSlug: string | null = null;
-  let userEmail: string | null = null;
-
-  try {
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      userEmail = user.email ?? null;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: rawOrg } = await (supabase as any)
-        .from("orgs")
-        .select("name, slug")
-        .eq("owner_id", user.id)
-        .maybeSingle();
-      const org = rawOrg as { name: string; slug: string } | null;
-      orgName = org?.name ?? null;
-      orgSlug = org?.slug ?? null;
-    }
-  } catch {
-    // Not authenticated — public page, skip
-  }
-
-  const showShell = orgName !== null;
+  const headersList = headers();
+  const pathname = headersList.get("x-pathname") ?? "";
+  const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
 
   return (
     <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
       <body>
-        {showShell ? (
+        {!isPublic ? (
           <div className="flex h-screen overflow-hidden bg-white">
-            <Sidebar orgName={orgName!} orgSlug={orgSlug!} userEmail={userEmail} />
+            <Sidebar orgName="Demo Org" orgSlug="demo-org" />
             <div className="flex flex-col flex-1 overflow-hidden">
               {children}
             </div>
           </div>
         ) : (
-          // Login / onboarding — no shell
           <>{children}</>
         )}
       </body>
