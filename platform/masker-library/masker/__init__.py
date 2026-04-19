@@ -1,8 +1,13 @@
 """
 masker — Python client for the Masker on-device PII/PHI voice-agent middleware.
 
-Delegates to the compiled `masker` CLI binary for all heavy lifting.
-Set MASKER_BIN to override the binary path, or ensure `masker` is on PATH.
+Works in two modes, selected automatically:
+
+1. **CLI mode** (full fidelity): delegates to the compiled ``masker`` binary.
+   Set ``MASKER_BIN=/path/to/masker`` or ensure ``masker`` is on PATH.
+
+2. **Pure-Python mode** (zero dependencies): built-in regex detection + policy
+   engine used as a fallback when the binary is not available.
 
 Quick start::
 
@@ -14,12 +19,17 @@ Quick start::
 
     turn = run_turn("What's the weather?")
     print(turn.safe_output)
+
+Check which mode is active::
+
+    import masker
+    print(masker.backend())   # "cli" or "pure-python"
 """
 from __future__ import annotations
 
 import json as _json
 
-from masker._cli import run_cli
+from masker._cli import run_cli, _find_binary
 from masker.contracts import (
     DetectionResult,
     Entity,
@@ -31,12 +41,14 @@ from masker.contracts import (
     TraceEvent,
     TurnResult,
 )
+import masker._pure as _pure
 
 __all__ = [
     "filter_input",
     "filter_output",
     "run_turn",
     "stream",
+    "backend",
     "DetectionResult",
     "Entity",
     "FilterInputResult",
@@ -49,7 +61,24 @@ __all__ = [
 ]
 
 
-# ── internal parsers ──────────────────────────────────────────────────────────
+def backend() -> str:
+    """Return ``'cli'`` if the masker binary is available, else ``'pure-python'``."""
+    try:
+        _find_binary()
+        return "cli"
+    except RuntimeError:
+        return "pure-python"
+
+
+def _cli_available() -> bool:
+    try:
+        _find_binary()
+        return True
+    except RuntimeError:
+        return False
+
+
+# ── internal parsers (used only in CLI mode) ──────────────────────────────────
 
 def _entity(d: dict) -> Entity:
     return Entity(
@@ -106,8 +135,11 @@ def filter_input(
         text: Raw user input to scan.
         policy: One of ``hipaa-base`` (default), ``hipaa-logging``, ``hipaa-clinical``.
         mask_mode: ``placeholder`` (default) replaces spans with ``[TYPE]``;
-                   ``token`` uses reversible opaque tokens.
+                   ``token`` uses reversible opaque tokens (CLI mode only).
     """
+    if not _cli_available():
+        return _pure.filter_input(text, policy=policy, mask_mode=mask_mode)
+
     data = run_cli(
         "filter-input",
         "--text", text,
@@ -134,6 +166,9 @@ def filter_output(
                    call. When provided, the same entities are used for scrubbing
                    instead of re-running detection.
     """
+    if not _cli_available():
+        return _pure.filter_output(text, detection)
+
     args = ["filter-output", "--text", text]
     if detection is not None:
         det_json = _json.dumps({
@@ -168,8 +203,12 @@ def run_turn(
     Args:
         text: User utterance.
         backend: ``auto`` (default), ``stub``, ``gemini``, or ``cactus``.
+                 Ignored in pure-Python mode (no LLM is available).
         policy: Policy name (same values as ``filter_input``).
     """
+    if not _cli_available():
+        return _pure.run_turn(text, backend=backend, policy=policy)
+
     data = run_cli(
         "run-turn",
         "--text", text,
@@ -200,7 +239,11 @@ def stream(
         text: Single utterance / audio transcript to process.
         session: Session ID for audit grouping (default ``ses_py``).
         api_key: Optional client API key to select a custom policy profile.
+                 Ignored in pure-Python mode.
     """
+    if not _cli_available():
+        return _pure.stream(text, session=session, api_key=api_key)
+
     args = ["stream", "--text", text, "--session", session]
     if api_key is not None:
         args += ["--api-key", api_key]
