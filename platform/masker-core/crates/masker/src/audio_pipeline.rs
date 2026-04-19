@@ -27,6 +27,8 @@ use crate::{detection, masking, policy};
 
 #[cfg(feature = "cactus")]
 use crate::cactus_sdk::CactusModel;
+#[cfg(feature = "cactus")]
+use crate::backends::LocalCactusBackend;
 
 // ── Audio types ───────────────────────────────────────────────────────────────
 
@@ -95,6 +97,17 @@ pub struct SttTranscript {
 /// Speech-to-text backend.
 pub trait SttBackend: Send + Sync {
     fn transcribe(&self, audio: &[u8]) -> anyhow::Result<SttTranscript>;
+
+    /// Optional variant that can leverage an on-disk audio artifact (for
+    /// multimodal models that ingest audio via file path).
+    fn transcribe_with_source(
+        &self,
+        audio: &[u8],
+        source_path: Option<&str>,
+    ) -> anyhow::Result<SttTranscript> {
+        let _ = source_path;
+        self.transcribe(audio)
+    }
 }
 
 /// Text-to-speech backend.
@@ -206,6 +219,75 @@ impl SttBackend for CactusSttBackend {
     }
 }
 
+/// Gemma-powered audio transcription via the Cactus multimodal interface.
+///
+/// This is *prompted* ASR (not a dedicated Whisper/Parakeet decoder), but it is
+/// useful for demos where a single Gemma-family model can both "hear" and
+/// classify the audio.
+#[cfg(feature = "cactus")]
+pub struct GemmaAudioSttBackend {
+    backend: LocalCactusBackend,
+}
+
+#[cfg(feature = "cactus")]
+impl GemmaAudioSttBackend {
+    pub fn from_env() -> anyhow::Result<Self> {
+        let model_path = std::env::var("CACTUS_GEMMA_STT_MODEL_PATH")
+            .or_else(|_| std::env::var("CACTUS_DETECTION_MODEL_PATH"))
+            .or_else(|_| std::env::var("CACTUS_MODEL_PATH"))
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "gemma stt backend unavailable: set CACTUS_GEMMA_STT_MODEL_PATH (or CACTUS_DETECTION_MODEL_PATH / CACTUS_MODEL_PATH)"
+                )
+            })?;
+
+        let system_prompt = Some(
+            "You are a speech-to-text transcription engine.\n\
+Return ONLY the transcript text in the audio's original language.\n\
+- No markdown, no JSON, no prefixes.\n\
+- No timestamps.\n\
+- Use digits for numbers (e.g. 1.5, 2026).\n\
+- Keep it to a single line (replace newlines with spaces)."
+                .to_string(),
+        );
+
+        Ok(Self {
+            backend: LocalCactusBackend::new(model_path, system_prompt)
+                .map_err(|e| anyhow::anyhow!("gemma stt backend unavailable: {e}"))?,
+        })
+    }
+}
+
+#[cfg(feature = "cactus")]
+impl SttBackend for GemmaAudioSttBackend {
+    fn transcribe(&self, _audio: &[u8]) -> anyhow::Result<SttTranscript> {
+        anyhow::bail!("gemma stt requires a source audio path (set AudioChunk.source_path)")
+    }
+
+    fn transcribe_with_source(
+        &self,
+        _audio: &[u8],
+        source_path: Option<&str>,
+    ) -> anyhow::Result<SttTranscript> {
+        let source_path =
+            source_path.ok_or_else(|| anyhow::anyhow!("gemma stt missing AudioChunk.source_path"))?;
+
+        let prompt = "Transcribe the attached audio. Output ONLY the transcription, with no newlines.";
+        let raw = self
+            .backend
+            .generate_with_audio(prompt, source_path, 512)
+            .map_err(|e| anyhow::anyhow!("gemma stt failed: {e}"))?;
+        let transcript = raw.trim().replace('\n', " ");
+        if transcript.is_empty() {
+            anyhow::bail!("gemma stt returned an empty transcript");
+        }
+        Ok(SttTranscript {
+            text: transcript,
+            segments: Vec::new(),
+        })
+    }
+}
+
 // ── Pipeline config ───────────────────────────────────────────────────────────
 
 pub struct PipelineConfig {
@@ -239,7 +321,9 @@ pub fn process_chunk(
     let mut trace: Vec<TraceEvent> = Vec::new();
 
     // ── Stage 1: STT ─────────────────────────────────────────────────────────
-    let stt_result = config.stt.transcribe(&chunk.data)?;
+    let stt_result = config
+        .stt
+        .transcribe_with_source(&chunk.data, chunk.source_path.as_deref())?;
     let raw_transcript = stt_result.text;
     trace.push(event(
         TraceStage::Stt,

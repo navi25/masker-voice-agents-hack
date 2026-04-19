@@ -21,6 +21,10 @@ pub enum EntityType {
     Dob,
     HealthContext,
     Other,
+    RoutingNumber,
+    AccountNumber,
+    Pin,
+    IpAddress,
 }
 
 impl EntityType {
@@ -36,6 +40,10 @@ impl EntityType {
             EntityType::Dob => "dob",
             EntityType::HealthContext => "health_context",
             EntityType::Other => "other",
+            EntityType::RoutingNumber => "routing_number",
+            EntityType::AccountNumber => "account_number",
+            EntityType::Pin => "pin",
+            EntityType::IpAddress => "ip_address",
         }
     }
 }

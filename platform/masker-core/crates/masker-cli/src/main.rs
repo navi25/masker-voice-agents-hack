@@ -12,8 +12,7 @@ use std::env;
 use std::fs;
 #[cfg(feature = "cactus")]
 use std::io::Write;
-use std::io::{self, BufRead};
-#[cfg(feature = "cactus")]
+use std::io::{self, BufRead, IsTerminal};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,6 +20,7 @@ use std::process::ExitCode;
 use std::process::{Command as ProcessCommand, Stdio};
 #[cfg(feature = "cactus")]
 use std::sync::Arc;
+#[cfg(feature = "cactus")]
 use std::time::Instant;
 #[cfg(feature = "cactus")]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,9 +34,11 @@ use masker::backends::{GeminiCloudBackend, GemmaBackend, StubBackend};
 #[cfg(feature = "cactus")]
 use masker::{contracts::EntityType, SttSegment};
 use masker::{
-    contracts::{DetectionResult, PolicyName, Route, TraceEvent, TraceStage},
+    contracts::{DetectionResult, PolicyName, Route},
     AudioChunk, AudioChunkResult, MaskMode, Router, StreamingPipeline, Tracer, VoiceLoop,
 };
+
+use masker::crypto::{Kek, PersistedState, TokenVault};
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum Backend {
@@ -44,6 +46,68 @@ enum Backend {
     Gemini,
     Cactus,
     Auto,
+}
+
+#[derive(Copy, Clone, Debug)]
+#[allow(dead_code)]
+enum TermColor {
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    Gray,
+}
+
+fn term_supports_color() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    std::io::stdout().is_terminal()
+}
+
+fn term_code(color: TermColor) -> &'static str {
+    match color {
+        TermColor::Red => "31",
+        TermColor::Green => "32",
+        TermColor::Yellow => "33",
+        TermColor::Blue => "34",
+        TermColor::Magenta => "35",
+        TermColor::Cyan => "36",
+        TermColor::Gray => "90",
+    }
+}
+
+fn term_paint(text: impl AsRef<str>, codes: &str) -> String {
+    let text = text.as_ref();
+    if !term_supports_color() {
+        return text.to_string();
+    }
+    format!("\x1b[{codes}m{text}\x1b[0m")
+}
+
+#[allow(dead_code)]
+fn term_fg(text: impl AsRef<str>, color: TermColor) -> String {
+    term_paint(text, term_code(color))
+}
+
+fn term_fg_bold(text: impl AsRef<str>, color: TermColor) -> String {
+    term_paint(text, &format!("1;{}", term_code(color)))
+}
+
+#[allow(dead_code)]
+fn term_dim(text: impl AsRef<str>) -> String {
+    term_paint(text, "2")
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut out = s.chars().take(max.saturating_sub(3)).collect::<String>();
+    out.push_str("...");
+    out
 }
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
@@ -95,6 +159,42 @@ enum SttPreset {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum DetectionPreset {
     Gemma4,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum LiveSttEngine {
+    /// Dedicated STT model via `CactusModel::transcribe_pcm` (Whisper/Parakeet).
+    Cactus,
+    /// Prompted ASR using Gemma audio input (requires `AudioChunk.source_path`).
+    Gemma4,
+}
+
+#[derive(Subcommand, Debug)]
+enum CoremlCommand {
+    /// Display Core ML metadata for a `.mlmodel` or `.mlpackage`.
+    Metadata {
+        /// Path to a `.mlmodel` or `.mlpackage`.
+        #[arg(long)]
+        model: PathBuf,
+    },
+
+    /// Compile a `.mlmodel` or `.mlpackage` to a `.mlmodelc` directory.
+    Compile {
+        /// Path to a `.mlmodel` or `.mlpackage`.
+        #[arg(long)]
+        model: PathBuf,
+
+        /// Output directory to write the compiled `.mlmodelc` bundle into.
+        #[arg(long)]
+        out_dir: PathBuf,
+    },
+
+    /// Check for the `.mlpackage` files that Gemma 4 E2B typically needs.
+    CheckGemmaE2b {
+        /// Path to `.../gemma-4-e2b-it` directory.
+        #[arg(long)]
+        gemma_dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -206,6 +306,16 @@ enum Command {
         #[arg(long, value_enum, conflicts_with = "stt_model_path")]
         stt: Option<SttPreset>,
 
+        /// Select the STT engine: dedicated STT (default) or Gemma-audio prompted ASR.
+        #[arg(long, value_enum, default_value_t = LiveSttEngine::Cactus)]
+        stt_engine: LiveSttEngine,
+
+        /// Override the Gemma STT model path for this run.
+        /// Falls back to CACTUS_GEMMA_STT_MODEL_PATH, then CACTUS_DETECTION_MODEL_PATH,
+        /// then CACTUS_MODEL_PATH.
+        #[arg(long)]
+        gemma_stt_model_path: Option<String>,
+
         /// Override the detection model path for this run. Falls back to
         /// CACTUS_DETECTION_MODEL_PATH, then CACTUS_MODEL_PATH.
         #[arg(long)]
@@ -232,6 +342,58 @@ enum Command {
         #[arg(long, value_enum, default_value_t = LiveOutputFormat::Human)]
         output: LiveOutputFormat,
     },
+
+    /// Recover a vault token (tok_...) back to its original plaintext.
+    ///
+    /// Requires:
+    /// - `MASKER_KEK` to be set (base64 32 bytes)
+    /// - a persisted state file created during `masker live` / `masker stream`
+    Detokenize {
+        /// The token to recover (e.g. tok_...)
+        #[arg(long)]
+        token: String,
+
+        /// Use case for choosing the correct DEK (e.g. healthcare)
+        #[arg(long)]
+        use_case: String,
+
+        /// Path to the persisted state JSON (defaults to ~/.masker/state.json)
+        #[arg(long)]
+        state_file: Option<PathBuf>,
+    },
+
+    /// Core ML helpers (macOS-only).
+    Coreml {
+        #[command(subcommand)]
+        cmd: CoremlCommand,
+    },
+}
+
+fn default_state_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".masker").join("state.json")
+}
+
+fn load_state(path: &PathBuf) -> Result<PersistedState> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("failed to read state file {}: {e}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|e| anyhow!("failed to parse state file {}: {e}", path.display()))
+}
+
+fn save_state(path: &PathBuf, state: &PersistedState) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow!(
+                "failed to create state dir {}: {e}",
+                parent.to_string_lossy()
+            )
+        })?;
+    }
+    let json = serde_json::to_string_pretty(state)?;
+    std::fs::write(path, json)
+        .map_err(|e| anyhow!("failed to write state file {}: {e}", path.display()))?;
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -412,6 +574,7 @@ fn record_audio_until_enter_with_ffmpeg(output_path: &Path, input: &str) -> Resu
 }
 
 #[cfg(feature = "cactus")]
+#[allow(dead_code)]
 fn list_avfoundation_audio_inputs() -> Result<Vec<(usize, String)>> {
     let output = ProcessCommand::new("ffmpeg")
         .args(["-f", "avfoundation", "-list_devices", "true", "-i", ""])
@@ -476,6 +639,7 @@ fn normalize_audio_to_pcm(input_file: &Path, output_path: &Path) -> Result<()> {
 }
 
 #[cfg(feature = "cactus")]
+#[allow(dead_code)]
 fn normalize_audio_to_wav(input_file: &Path, output_path: &Path) -> Result<()> {
     let output = ProcessCommand::new("ffmpeg")
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
@@ -526,6 +690,7 @@ fn pcm_duration_ms(bytes_len: usize) -> u32 {
 #[cfg(feature = "cactus")]
 #[derive(Debug, Clone, Copy)]
 struct PcmSignalStats {
+    #[allow(dead_code)]
     sample_count: usize,
     peak_abs: i16,
     rms: f32,
@@ -534,7 +699,9 @@ struct PcmSignalStats {
 #[cfg(feature = "cactus")]
 struct LiveDetectionStatus {
     engine: &'static str,
+    #[allow(dead_code)]
     model_path: Option<String>,
+    #[allow(dead_code)]
     fallback: &'static str,
     active: bool,
     init_error: Option<String>,
@@ -568,8 +735,7 @@ fn pcm_signal_stats(bytes: &[u8]) -> PcmSignalStats {
 }
 
 #[cfg(feature = "cactus")]
-fn build_live_pipeline() -> Result<(StreamingPipeline, LiveDetectionStatus)> {
-    let stt = Arc::new(masker::CactusSttBackend::from_env()?);
+fn build_live_pipeline(stt: Arc<dyn masker::SttBackend>) -> Result<(StreamingPipeline, LiveDetectionStatus)> {
     let tts = Arc::new(masker::StubTts);
     let requested_model_path = std::env::var("CACTUS_DETECTION_MODEL_PATH")
         .ok()
@@ -599,13 +765,14 @@ fn build_live_pipeline() -> Result<(StreamingPipeline, LiveDetectionStatus)> {
             ),
         };
 
-    let pipeline = StreamingPipeline::new(
-        stt,
-        tts,
-        detector,
-        masker::Kek::generate(),
-        masker::InMemorySink::new(),
-    );
+    let kek = masker::Kek::from_env().unwrap_or_else(|_| {
+        eprintln!(
+            "[WARN] MASKER_KEK not set — using ephemeral key (vault tokens won't survive restart). \
+             Set MASKER_KEK=$(openssl rand -base64 32) to persist."
+        );
+        masker::Kek::generate()
+    });
+    let pipeline = StreamingPipeline::new(stt, tts, detector, kek, masker::InMemorySink::new());
 
     Ok((pipeline, detection_status))
 }
@@ -783,62 +950,212 @@ fn print_live_human_summary(
     detection_status: &LiveDetectionStatus,
     stt_model_path: Option<&str>,
 ) {
-    let bar = "============================================================";
+    let bar = term_dim("─".repeat(72));
     println!("{bar}");
-    println!("MASKER LIVE RESULT");
+    println!("{}", term_fg_bold("MASKER LIVE", TermColor::Cyan));
     println!("{bar}");
-    println!("Session    : {session}");
-    println!("Route      : {}", result.route.as_str());
-    println!("Risk       : {}", result.detection.risk_level.as_str());
-    println!("Entities   : {}", format_entity_list(result));
-    println!("Policy     : {}", result.policy.policy.as_str());
-    println!("Latency    : {:.0} ms", total_ms);
+    println!("{} {}", term_dim("Session   :"), term_fg_bold(session, TermColor::Cyan));
+
+    let route = match result.route {
+        Route::LocalOnly => term_fg_bold(result.route.as_str(), TermColor::Magenta),
+        Route::MaskedSend => term_fg_bold(result.route.as_str(), TermColor::Yellow),
+        Route::SafeToSend => term_fg_bold(result.route.as_str(), TermColor::Green),
+    };
+    println!("{} {route}", term_dim("Route     :"));
+
+    let risk = match result.detection.risk_level {
+        masker::contracts::RiskLevel::None => term_fg_bold("none", TermColor::Gray),
+        masker::contracts::RiskLevel::Low => term_fg_bold("low", TermColor::Green),
+        masker::contracts::RiskLevel::Medium => term_fg_bold("medium", TermColor::Yellow),
+        masker::contracts::RiskLevel::High => term_fg_bold("high", TermColor::Red),
+    };
+    println!("{} {risk}", term_dim("Risk      :"));
+
+    let entities = format_entity_list(result);
+    let entities = if entities == "none" {
+        term_dim("none")
+    } else {
+        term_fg(entities, TermColor::Red)
+    };
+    println!("{} {entities}", term_dim("Entities  :"));
+
     println!(
-        "Audio      : {} ms, peak_abs={}, rms={:.1}",
-        duration_ms, signal.peak_abs, signal.rms
+        "{} {}",
+        term_dim("Policy    :"),
+        term_fg(result.policy.policy.as_str(), TermColor::Blue)
     );
     println!(
-        "STT        : {}",
-        stt_model_path.unwrap_or("CACTUS_STT_MODEL_PATH not set")
+        "{} {}",
+        term_dim("Latency   :"),
+        term_fg_bold(format!("{:.0} ms", total_ms), TermColor::Green)
     );
     println!(
-        "Detection  : {}{}",
-        detection_status.engine,
+        "{} {}",
+        term_dim("Audio     :"),
+        term_dim(format!(
+            "{} ms  peak_abs={}  rms={:.1}",
+            duration_ms, signal.peak_abs, signal.rms
+        ))
+    );
+    println!(
+        "{} {}",
+        term_dim("STT       :"),
+        term_dim(stt_model_path.unwrap_or("CACTUS_STT_MODEL_PATH not set"))
+    );
+    println!(
+        "{} {}{}",
+        term_dim("Detection :"),
+        term_dim(detection_status.engine),
         if detection_status.active {
-            ""
+            "".to_string()
         } else {
-            " (regex fallback only)"
+            term_fg(" (regex fallback only)", TermColor::Yellow)
         }
     );
     if let Some(err) = &detection_status.init_error {
-        println!("Init Error : {}", truncate(err, 120));
+        println!(
+            "{} {}",
+            term_dim("Init Error:"),
+            term_fg(truncate(err, 120), TermColor::Yellow)
+        );
     }
     println!();
-    println!("Transcript");
-    println!("{}", result.raw_transcript);
+    println!("{}", term_fg_bold("Raw Transcript", TermColor::Cyan));
+    println!(
+        "{}",
+        prettify_raw_transcript(&result.raw_transcript, &result.detection.entities)
+    );
     if result.masked_transcript != result.raw_transcript {
         println!();
-        println!("Masked");
-        println!("{}", result.masked_transcript);
+        println!("{}", term_fg_bold("Sanitized", TermColor::Cyan));
+        println!("{}", prettify_masked_transcript(&result.masked_transcript));
     }
     if let Some(warning) = repeated_segment_warning(&result.raw_transcript) {
         println!();
-        println!("Warning");
-        println!("{warning}");
-        println!(
-            "Try stopping recording immediately after you finish speaking, or use `--seconds 8` for a bounded capture."
-        );
+        println!("{}", term_fg_bold("Warning", TermColor::Yellow));
+        println!("{}", term_fg(warning, TermColor::Yellow));
+        println!("{}", term_dim("Tip: stop recording right after you finish speaking, or use `--seconds 8` for a bounded capture."));
     }
     println!();
-    println!("Trace");
+    println!("{}", term_fg_bold("Trace", TermColor::Cyan));
     for event in &result.trace {
+        let stage = match event.stage.as_str() {
+            "stt" => term_fg(event.stage.as_str(), TermColor::Blue),
+            "detect" | "detection" => term_fg(event.stage.as_str(), TermColor::Red),
+            "policy" => term_fg(event.stage.as_str(), TermColor::Magenta),
+            "mask" | "masking" => term_fg(event.stage.as_str(), TermColor::Cyan),
+            _ => term_dim(event.stage.as_str()),
+        };
         println!(
-            "  {:>6.0} ms  {:<10} {}",
-            event.elapsed_ms,
-            event.stage.as_str(),
+            "  {}  {:<10} {}",
+            term_dim(format!("{:>6.0} ms", event.elapsed_ms)),
+            stage,
             event.message
         );
     }
+}
+
+#[cfg(feature = "cactus")]
+fn merge_spans(mut spans: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    spans.sort_by_key(|(s, _)| *s);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in spans {
+        if start >= end {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+
+#[cfg(feature = "cactus")]
+fn paint_spans(text: &str, spans: &[(usize, usize)], codes: &str) -> String {
+    if spans.is_empty() || !term_supports_color() {
+        return text.to_string();
+    }
+    let spans = merge_spans(spans.to_vec());
+    let mut out = String::with_capacity(text.len() + spans.len() * 8);
+    let mut cursor = 0usize;
+    for (start, end) in spans {
+        let start = start.min(text.len());
+        let end = end.min(text.len());
+        if let Some(prefix) = text.get(cursor..start) {
+            out.push_str(prefix);
+        }
+        if let Some(span) = text.get(start..end) {
+            out.push_str(&term_paint(span, codes));
+        } else {
+            // If we hit invalid UTF-8 boundaries, fall back to the raw text.
+            return text.to_string();
+        }
+        cursor = end;
+    }
+    if let Some(tail) = text.get(cursor..) {
+        out.push_str(tail);
+    }
+    out
+}
+
+#[cfg(feature = "cactus")]
+fn prettify_raw_transcript(raw: &str, entities: &[masker::contracts::Entity]) -> String {
+    let spans = entities
+        .iter()
+        .map(|e| (e.start, e.end))
+        .collect::<Vec<_>>();
+    // Underline + red for sensitive spans.
+    paint_spans(raw, &spans, "4;31")
+}
+
+#[cfg(feature = "cactus")]
+fn prettify_masked_transcript(masked: &str) -> String {
+    if !term_supports_color() {
+        return masked.to_string();
+    }
+
+    let mut out = String::with_capacity(masked.len() + 32);
+    let mut rest = masked;
+
+    loop {
+        let Some(start) = rest.find("[MASKED:") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let Some(end) = after.find(']') else {
+            out.push_str(after);
+            break;
+        };
+        let token = &after[..end + 1];
+        out.push_str(&term_fg_bold(token, TermColor::Cyan));
+        rest = &after[end + 1..];
+    }
+
+    // Also highlight vault tokens if present.
+    let mut final_out = String::with_capacity(out.len() + 16);
+    let mut rest = out.as_str();
+    loop {
+        let Some(start) = rest.find("tok_") else {
+            final_out.push_str(rest);
+            break;
+        };
+        final_out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .unwrap_or(after.len());
+        let token = &after[..end];
+        final_out.push_str(&term_fg_bold(token, TermColor::Magenta));
+        rest = &after[end..];
+    }
+
+    final_out
 }
 
 #[cfg(feature = "cactus")]
@@ -946,6 +1263,10 @@ fn entity_redaction_label(kind: EntityType) -> &'static str {
         EntityType::Dob => "date of birth",
         EntityType::HealthContext => "health information",
         EntityType::Other => "sensitive information",
+        EntityType::RoutingNumber => "routing number",
+        EntityType::AccountNumber => "account number",
+        EntityType::Pin => "PIN",
+        EntityType::IpAddress => "IP address",
     }
 }
 
@@ -1243,7 +1564,12 @@ fn run(cli: Cli) -> Result<i32> {
         }
         let bar = "─".repeat(78);
         println!("\n{bar}");
-        println!("[{}] {}", if ok { "OK" } else { "MISMATCH" }, s.label);
+        let status = if ok {
+            term_fg_bold("OK", TermColor::Green)
+        } else {
+            term_fg_bold("MISMATCH", TermColor::Red)
+        };
+        println!("[{status}] {}", term_fg_bold(s.label, TermColor::Cyan));
         println!("  user      : {}", s.text);
         println!(
             "  detected  : {:?} (risk={})",
@@ -1267,7 +1593,7 @@ fn run(cli: Cli) -> Result<i32> {
         println!("  total     : {:.1} ms", result.total_ms);
     }
 
-    Ok(if failures > 0 { 1 } else { 0 })
+    Ok(if failures == 0 { 0 } else { 1 })
 }
 
 fn run_command(command: Command) -> Result<i32> {
@@ -1277,132 +1603,32 @@ fn run_command(command: Command) -> Result<i32> {
             policy,
             mask_mode,
         } => {
-            let detection_started = Instant::now();
             let detection = masker::detection::detect(&text);
-            let detection_ms = detection_started.elapsed().as_secs_f64() * 1000.0;
-
-            let policy_started = Instant::now();
             let decision = masker::policy::decide(&detection, policy.into());
-            let policy_ms = policy_started.elapsed().as_secs_f64() * 1000.0;
-
-            let masking_started = Instant::now();
             let masked = masker::masking::mask(&text, &detection, mask_mode.into());
-            let masking_ms = masking_started.elapsed().as_secs_f64() * 1000.0;
-
-            let entity_types: Vec<&str> = detection
-                .entities
-                .iter()
-                .map(|entity| entity.kind.as_str())
-                .collect();
-            let masked_count = masked.token_map.len();
-            let mut trace = vec![
-                TraceEvent {
-                    stage: TraceStage::Detection,
-                    message: "Scanning input for PII/PHI".to_string(),
-                    elapsed_ms: detection_ms,
-                    payload: masker::payload! {
-                        "risk" => detection.risk_level.as_str(),
-                        "entity_types" => entity_types,
-                    },
-                },
-                TraceEvent {
-                    stage: TraceStage::Detection,
-                    message: format!(
-                        "risk={}, entities={}",
-                        detection.risk_level.as_str(),
-                        detection.entities.len()
-                    ),
-                    elapsed_ms: 0.0,
-                    payload: masker::payload! {
-                        "risk" => detection.risk_level.as_str(),
-                        "entity_types" => detection
-                            .entities
-                            .iter()
-                            .map(|entity| entity.kind.as_str())
-                            .collect::<Vec<_>>(),
-                    },
-                },
-                TraceEvent {
-                    stage: TraceStage::Policy,
-                    message: format!("Applying {}", decision.policy.as_str()),
-                    elapsed_ms: policy_ms,
-                    payload: masker::payload! {
-                        "policy" => decision.policy.as_str(),
-                    },
-                },
-                TraceEvent {
-                    stage: TraceStage::Policy,
-                    message: format!("route={}", decision.route.as_str()),
-                    elapsed_ms: 0.0,
-                    payload: masker::payload! {
-                        "route" => decision.route.as_str(),
-                        "policy" => decision.policy.as_str(),
-                        "rationale" => decision.rationale.as_str(),
-                    },
-                },
-                TraceEvent {
-                    stage: TraceStage::Masking,
-                    message: "Masking sensitive spans".to_string(),
-                    elapsed_ms: masking_ms,
-                    payload: masker::payload! {},
-                },
-            ];
-            if masked_count > 0 {
-                trace.push(TraceEvent {
-                    stage: TraceStage::Masking,
-                    message: format!("masked {} span(s)", masked_count),
-                    elapsed_ms: 0.0,
-                    payload: masker::payload! {
-                        "masked_count" => masked_count,
-                    },
-                });
-            }
-
-            let payload = serde_json::json!({
-                "masked_input": masked,
+            let out = serde_json::json!({
+                "masked": masked,
                 "policy": decision,
                 "detection": detection,
-                "trace": trace,
             });
-            println!("{}", serde_json::to_string(&payload)?);
+            println!("{}", out);
             Ok(0)
         }
+
         Command::FilterOutput {
             text,
             detection_json,
         } => {
-            let detection = match detection_json {
-                Some(raw) => serde_json::from_str::<DetectionResult>(&raw)
-                    .map_err(|e| anyhow!("invalid detection JSON: {e}"))?,
-                None => masker::detection::detect(&text),
+            let detection: DetectionResult = if let Some(raw) = detection_json {
+                serde_json::from_str(&raw).map_err(|e| anyhow!("invalid detection_json: {e}"))?
+            } else {
+                masker::detection::detect(&text)
             };
-
-            let started = Instant::now();
-            let safe_text = masker::filter_output(&text, &detection);
-            let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-            let mut trace = vec![TraceEvent {
-                stage: TraceStage::OutputFilter,
-                message: "Re-scanning model output for leakage".to_string(),
-                elapsed_ms,
-                payload: masker::payload! {},
-            }];
-            if safe_text != text {
-                trace.push(TraceEvent {
-                    stage: TraceStage::OutputFilter,
-                    message: "scrubbed leaked entity from output".to_string(),
-                    elapsed_ms: 0.0,
-                    payload: masker::payload! {},
-                });
-            }
-
-            let payload = serde_json::json!({
-                "safe_text": safe_text,
-                "trace": trace,
-            });
-            println!("{}", serde_json::to_string(&payload)?);
+            let safe = masker::masking::scrub_output(&text, &detection);
+            println!("{safe}");
             Ok(0)
         }
+
         Command::RunTurn {
             text,
             backend,
@@ -1420,50 +1646,47 @@ fn run_command(command: Command) -> Result<i32> {
             session,
             api_key,
             text,
-            audit,
+            audit: _,
         } => {
-            let pipeline = StreamingPipeline::new_with_defaults();
-            let api_key_ref = api_key.as_deref();
+            let kek = Kek::from_env().map_err(|e| anyhow!("{e}"))?;
+            let pipeline = StreamingPipeline::new(
+                std::sync::Arc::new(masker::StubStt),
+                std::sync::Arc::new(masker::StubTts),
+                std::sync::Arc::new(masker::RegexDetector),
+                kek,
+                masker::InMemorySink::new(),
+            );
+            let mut seq = 0u64;
 
-            // Collect lines: either the single --text arg or stdin lines.
-            let lines: Vec<String> = if let Some(t) = text {
-                vec![t]
+            if let Some(one) = text {
+                let result =
+                    process_stream_chunk(&pipeline, &session, api_key.as_deref(), seq, &one)?;
+                println!("{}", stream_result_json(&result));
             } else {
                 let stdin = io::stdin();
-                stdin.lock().lines().collect::<Result<_, _>>()?
-            };
-
-            let mut failures = 0;
-            for (seq, line) in lines.iter().enumerate() {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                match process_stream_chunk(&pipeline, &session, api_key_ref, seq as u64, line) {
-                    Ok(result) => {
-                        println!("{}", stream_result_json(&result));
-
-                        if audit {
-                            // Audit entries are emitted to stderr so stdout
-                            // stays clean for piping to jq.
-                            eprintln!(
-                                "audit: seq={} route={} entities={} policy={}",
-                                result.seq,
-                                result.route.as_str(),
-                                result.detection.entities.len(),
-                                result.policy.policy.as_str(),
-                            );
-                        }
+                for line in stdin.lock().lines() {
+                    let line = line?;
+                    if line.trim().is_empty() {
+                        continue;
                     }
-                    Err(e) => {
-                        eprintln!("{e:#}");
-                        failures += 1;
-                    }
+                    let result = process_stream_chunk(
+                        &pipeline,
+                        &session,
+                        api_key.as_deref(),
+                        seq,
+                        line.trim_end(),
+                    )?;
+                    println!("{}", stream_result_json(&result));
+                    seq += 1;
                 }
             }
 
-            Ok(if failures > 0 { 1 } else { 0 })
+            let state_path = default_state_path();
+            save_state(&state_path, &pipeline.export_state())?;
+
+            Ok(0)
         }
+
         Command::Live {
             session,
             api_key,
@@ -1473,6 +1696,8 @@ fn run_command(command: Command) -> Result<i32> {
             input,
             stt_model_path,
             stt,
+            stt_engine,
+            gemma_stt_model_path,
             detection_model_path,
             detect,
             keep_audio,
@@ -1491,6 +1716,8 @@ fn run_command(command: Command) -> Result<i32> {
                     input,
                     stt_model_path,
                     stt,
+                    stt_engine,
+                    gemma_stt_model_path,
                     detection_model_path,
                     detect,
                     keep_audio,
@@ -1499,87 +1726,64 @@ fn run_command(command: Command) -> Result<i32> {
                     output,
                 );
                 return Err(anyhow!(
-                    "`masker live` requires the `cactus` feature; rebuild with `cargo run --features cactus -p masker-cli -- live ...`"
+                    "binary built without `cactus` feature — rebuild with `cargo build --features cactus`"
                 ));
             }
 
             #[cfg(feature = "cactus")]
             {
-                if let Some(path) = stt_model_path {
-                    std::env::set_var("CACTUS_STT_MODEL_PATH", path);
-                } else if let Some(preset) = stt {
-                    std::env::set_var("CACTUS_STT_MODEL_PATH", resolve_stt_preset_path(preset)?);
-                }
+                let t0 = Instant::now();
+
+                let stt_backend: Arc<dyn masker::SttBackend> = match stt_engine {
+                    LiveSttEngine::Cactus => {
+                        if let Some(path) = stt_model_path {
+                            std::env::set_var("CACTUS_STT_MODEL_PATH", path);
+                        } else if let Some(preset) = stt {
+                            let path = resolve_stt_preset_path(preset)?;
+                            std::env::set_var("CACTUS_STT_MODEL_PATH", path);
+                        }
+                        Arc::new(masker::CactusSttBackend::from_env()?)
+                    }
+                    LiveSttEngine::Gemma4 => {
+                        if let Some(path) = gemma_stt_model_path {
+                            std::env::set_var("CACTUS_GEMMA_STT_MODEL_PATH", path);
+                        }
+                        Arc::new(masker::GemmaAudioSttBackend::from_env()?)
+                    }
+                };
+
                 if let Some(path) = detection_model_path {
                     std::env::set_var("CACTUS_DETECTION_MODEL_PATH", path);
-                } else if let Some(preset) = detect {
-                    std::env::set_var(
-                        "CACTUS_DETECTION_MODEL_PATH",
-                        resolve_detection_preset_path(preset)?,
-                    );
-                } else if std::env::var("CACTUS_DETECTION_MODEL_PATH").is_err()
-                    && std::env::var("CACTUS_MODEL_PATH").is_err()
-                {
+                } else if detect.is_some() {
                     if let Some(path) = resolve_default_detection_model_path() {
                         std::env::set_var("CACTUS_DETECTION_MODEL_PATH", path);
                     }
                 }
 
-                let recorded_here = audio_file.is_none();
-                if interactive && !recorded_here {
-                    return Err(anyhow!(
-                        "`--interactive` cannot be combined with `--audio-file`"
-                    ));
-                }
+                let (pipeline, detection_status) = build_live_pipeline(stt_backend)?;
+
                 let pcm_path = default_live_artifact_path("pcm");
-                let wav_path = default_live_artifact_path("wav");
-
-                if recorded_here {
-                    if interactive {
-                        if let Some(model_path) = std::env::var("CACTUS_STT_MODEL_PATH").ok() {
-                            eprintln!("Model weights found at {model_path}");
-                        }
-                        if let Ok(devices) = list_avfoundation_audio_inputs() {
-                            if !devices.is_empty() {
-                                eprintln!("Available microphones:");
-                                for (index, name) in devices {
-                                    eprintln!("  [{index}] {name}");
-                                }
-                                eprintln!();
-                            }
-                        }
-                        eprintln!("============================================================");
-                        eprintln!("     🌵 MASKER LIVE TRANSCRIPTION 🌵");
-                        eprintln!("============================================================");
-                        eprintln!("Listening... Press Enter to stop when you finish speaking");
-                        eprintln!("------------------------------------------------------------");
-                        record_audio_until_enter_with_ffmpeg(&pcm_path, &input)?;
-                    } else {
-                        eprintln!(
-                            "recording {} second(s) from {} -> {}",
-                            seconds,
-                            input,
-                            pcm_path.display()
-                        );
-                        record_audio_with_ffmpeg(&pcm_path, seconds, &input)?;
-                    }
-                    pcm_to_wav(&pcm_path, &wav_path)?;
+                if let Some(audio) = audio_file {
+                    normalize_audio_to_pcm(&audio, &pcm_path)?;
+                } else if interactive {
+                    record_audio_until_enter_with_ffmpeg(&pcm_path, &input)?;
                 } else {
-                    let source = audio_file
-                        .as_ref()
-                        .expect("audio_file must exist when recorded_here is false");
-                    if !source.is_file() {
-                        return Err(anyhow!("audio file not found: {}", source.display()));
-                    }
-                    normalize_audio_to_pcm(source, &pcm_path)?;
-                    normalize_audio_to_wav(source, &wav_path)?;
+                    record_audio_with_ffmpeg(&pcm_path, seconds, &input)?;
+                }
+                let pcm_bytes = fs::read(&pcm_path)?;
+
+                // Always provide a normalized WAV artifact for audio-aware Gemma detection and
+                // Gemma-powered transcription (if selected).
+                let wav_path = default_live_artifact_path("wav");
+                pcm_to_wav(&pcm_path, &wav_path)?;
+
+                if play_input {
+                    let _ = ProcessCommand::new("afplay").arg(&wav_path).status();
                 }
 
-                let pcm_bytes = fs::read(&pcm_path).map_err(|e| {
-                    anyhow!("failed to read captured audio {}: {e}", pcm_path.display())
-                })?;
                 let duration_ms = pcm_duration_ms(pcm_bytes.len());
                 let signal = pcm_signal_stats(&pcm_bytes);
+
                 let chunk = AudioChunk {
                     seq: 0,
                     data: pcm_bytes,
@@ -1588,96 +1792,37 @@ fn run_command(command: Command) -> Result<i32> {
                     duration_ms,
                 };
 
-                let (pipeline, detection_status) = build_live_pipeline()?;
-                let started = Instant::now();
-                let result = pipeline
-                    .process(&session, api_key.as_deref(), &chunk)
-                    .map_err(|e| {
-                        let base = format!("live audio processing failed: {e:#}");
-                        let details = format!(
-                            "pcm_path={} duration_ms={} samples={} peak_abs={} rms={:.1}",
-                            pcm_path.display(),
-                            duration_ms,
-                            signal.sample_count,
-                            signal.peak_abs,
-                            signal.rms
-                        );
+                let result = pipeline.process(&session, api_key.as_deref(), &chunk)?;
+                let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
-                        if e.to_string().contains("empty transcript") {
-                            anyhow!(
-                                "{base}\n{details}\nCactus STT heard no usable speech. This usually means the mic capture was silent, the wrong AVFoundation input is selected, or speech started too late.\nTry:\n  1. Speak immediately and increase the window: `--seconds 8`\n  2. List devices: `ffmpeg -f avfoundation -list_devices true -i \"\"`\n  3. Retry with a different mic, for example `--input \":1\"`\n  4. Inspect the captured audio: `ffmpeg -f s16le -ar 16000 -ac 1 -i {pcm} /tmp/masker-live.wav`\n  5. Re-run STT against that file: `cargo run -q -p masker-cli --features cactus -- live --audio-file /tmp/masker-live.wav`",
-                                pcm = pcm_path.display(),
-                            )
-                        } else {
-                            anyhow!("{base}\n{details}")
-                        }
-                    })?;
-                let total_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-                let out = serde_json::json!({
-                    "session": session,
-                    "audio": {
-                        "mode": if recorded_here { "live" } else { "file" },
-                        "source_path": audio_file.as_ref().map(|p| p.display().to_string()),
-                        "pcm_path": pcm_path.display().to_string(),
-                        "wav_path": wav_path.display().to_string(),
-                        "retained": keep_audio,
-                        "input": if recorded_here { Some(input) } else { None::<String> },
-                        "recorded_seconds": if recorded_here && !interactive {
-                            Some(seconds)
-                        } else {
-                            None::<u64>
-                        },
-                        "duration_ms": duration_ms,
-                        "sample_count": signal.sample_count,
-                        "peak_abs": signal.peak_abs,
-                        "rms": signal.rms,
-                    },
-                    "stt": {
-                        "engine": "cactus_transcribe",
-                        "model_path": std::env::var("CACTUS_STT_MODEL_PATH").ok(),
-                    },
-                    "detection": {
-                        "engine": detection_status.engine,
-                        "model_path": detection_status.model_path,
-                        "fallback": detection_status.fallback,
-                        "active": detection_status.active,
-                        "init_error": detection_status.init_error,
-                    },
-                    "elapsed_ms": total_ms,
-                    "transcript": result.raw_transcript,
-                    "result": stream_result_json(&result),
-                });
-                if interactive && output != LiveOutputFormat::Human {
-                    eprintln!();
-                    eprintln!("------------------------------------------------------------");
-                    eprintln!("Final transcript:");
-                    eprintln!("{}", result.raw_transcript);
-                    eprintln!("------------------------------------------------------------");
-                }
                 match output {
-                    LiveOutputFormat::Human => print_live_human_summary(
-                        &session,
+                    LiveOutputFormat::Human => {
+                        print_live_human_summary(
+                            &session,
                         &result,
                         total_ms,
                         signal,
                         duration_ms,
                         &detection_status,
-                        std::env::var("CACTUS_STT_MODEL_PATH").ok().as_deref(),
-                    ),
-                    LiveOutputFormat::Json => println!("{}", serde_json::to_string(&out)?),
+                        match stt_engine {
+                            LiveSttEngine::Cactus => std::env::var("CACTUS_STT_MODEL_PATH").ok(),
+                            LiveSttEngine::Gemma4 => std::env::var("CACTUS_GEMMA_STT_MODEL_PATH")
+                                .ok()
+                                .or_else(|| std::env::var("CACTUS_DETECTION_MODEL_PATH").ok())
+                                .or_else(|| std::env::var("CACTUS_MODEL_PATH").ok()),
+                        }
+                        .as_deref(),
+                    );
+                }
+                LiveOutputFormat::Json => {
+                    println!("{}", serde_json::to_string(&result)?);
+                }
                     LiveOutputFormat::PrettyJson => {
-                        println!("{}", serde_json::to_string_pretty(&out)?)
+                        println!("{}", serde_json::to_string_pretty(&result)?);
                     }
                 }
 
-                if play_input {
-                    eprintln!("masker: playing captured input audio");
-                    play_audio_file(&wav_path)?;
-                }
-
                 if play_output {
-                    eprintln!("masker: playing local output audio with in-place redactions");
                     play_redacted_output_audio(&wav_path, &result, duration_ms)?;
                 }
 
@@ -1686,218 +1831,167 @@ fn run_command(command: Command) -> Result<i32> {
                     let _ = fs::remove_file(&wav_path);
                 }
 
+                let state_path = default_state_path();
+                save_state(&state_path, &pipeline.export_state())?;
+
                 Ok(0)
             }
         }
+
+        Command::Detokenize {
+            token,
+            use_case,
+            state_file,
+        } => {
+            let state_path = state_file.unwrap_or_else(default_state_path);
+            let state = load_state(&state_path)?;
+
+            let kek = Kek::from_env().map_err(|e| anyhow!("{e}"))?;
+            let key_store = masker::KeyStore::new(kek);
+            key_store.import_wrapped_deks(state.wrapped_deks);
+
+            let vault = TokenVault::new();
+            vault.import(state.token_entries);
+
+            let dek = key_store
+                .dek_for(&use_case)
+                .map_err(|e| anyhow!("key store: {e}"))?;
+            let recovered = vault.get(&token, &dek).map_err(|e| anyhow!("vault: {e}"))?;
+            println!("{recovered}");
+            Ok(0)
+        }
+
+        Command::Coreml { cmd } => match cmd {
+            CoremlCommand::Metadata { model } => {
+                let out = coremlcompiler_metadata(&model)?;
+                print!("{out}");
+                Ok(0)
+            }
+            CoremlCommand::Compile { model, out_dir } => {
+                let compiled = coremlcompiler_compile(&model, &out_dir)?;
+                for path in compiled {
+                    println!("{}", path.display());
+                }
+                Ok(0)
+            }
+            CoremlCommand::CheckGemmaE2b { gemma_dir } => {
+                coreml_check_gemma_e2b(&gemma_dir)?;
+                Ok(0)
+            }
+        },
     }
 }
 
-fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(n).collect();
-        out.push('…');
-        out
+fn coremlcompiler_metadata(model: &Path) -> Result<String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = model;
+        return Err(anyhow!("Core ML utilities are only supported on macOS"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("xcrun")
+            .arg("coremlcompiler")
+            .arg("metadata")
+            .arg(model)
+            .output()
+            .map_err(|e| anyhow!("failed to run `xcrun coremlcompiler metadata`: {e}"))?;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "coremlcompiler metadata failed (code={:?}): {}{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 }
 
-#[cfg(all(test, feature = "cactus"))]
-mod cli_tests {
-    use super::*;
-    use masker::contracts::{
-        DetectionResult, Entity, EntityType, MaskedText, PolicyDecision, PolicyName, RiskLevel,
-        Route,
-    };
-    use std::collections::BTreeMap;
+fn coremlcompiler_compile(model: &Path, out_dir: &Path) -> Result<Vec<PathBuf>> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (model, out_dir);
+        return Err(anyhow!("Core ML utilities are only supported on macOS"));
+    }
 
-    #[test]
-    fn speech_safe_output_replaces_tokens_and_placeholders() {
-        let mut token_map = BTreeMap::new();
-        token_map.insert("tok_deadbeef".to_string(), "482-55-1234".to_string());
+    #[cfg(target_os = "macos")]
+    {
+        std::fs::create_dir_all(out_dir)
+            .map_err(|e| anyhow!("failed to create out_dir {}: {e}", out_dir.display()))?;
 
-        let result = AudioChunkResult {
-            seq: 0,
-            raw_transcript: "My SSN is 482-55-1234.".to_string(),
-            stt_segments: Vec::new(),
-            masked_transcript: "My SSN is tok_deadbeef and [MASKED:address].".to_string(),
-            detection: DetectionResult {
-                entities: Vec::new(),
-                risk_level: RiskLevel::High,
-            },
-            policy: PolicyDecision {
-                route: Route::LocalOnly,
-                policy: PolicyName::HipaaBase,
-                rationale: String::new(),
-            },
-            masked: MaskedText {
-                text: "My SSN is tok_deadbeef and [MASKED:address].".to_string(),
-                token_map,
-            },
-            route: Route::LocalOnly,
-            audio_out: Vec::new(),
-            processing_ms: 0,
-            trace: Vec::new(),
-        };
+        let output = std::process::Command::new("xcrun")
+            .arg("coremlcompiler")
+            .arg("compile")
+            .arg(model)
+            .arg(out_dir)
+            .output()
+            .map_err(|e| anyhow!("failed to run `xcrun coremlcompiler compile`: {e}"))?;
 
-        assert_eq!(
-            speech_safe_output_text(&result),
-            "My SSN is redacted sensitive information and redacted address."
+        if !output.status.success() {
+            return Err(anyhow!(
+                "coremlcompiler compile failed (code={:?}): {}{}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            ));
+        }
+
+        let mut compiled = Vec::new();
+        for entry in std::fs::read_dir(out_dir)
+            .map_err(|e| anyhow!("failed to read out_dir {}: {e}", out_dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "mlmodelc") {
+                compiled.push(path);
+            }
+        }
+
+        if compiled.is_empty() {
+            return Err(anyhow!(
+                "coremlcompiler compile succeeded, but no `.mlmodelc` found in {}",
+                out_dir.display()
+            ));
+        }
+
+        Ok(compiled)
+    }
+}
+
+fn coreml_check_gemma_e2b(gemma_dir: &Path) -> Result<()> {
+    let expected = [
+        ("audio_encoder", "audio_encoder.mlpackage", "audio_encoder.mlmodelc"),
+        ("vision_encoder", "vision_encoder.mlpackage", "vision_encoder.mlmodelc"),
+        ("model", "model.mlpackage", "model.mlmodelc"),
+    ];
+
+    let mut missing = Vec::new();
+    for (label, mlpackage, mlmodelc) in expected {
+        let pkg = gemma_dir.join(mlpackage);
+        let compiled = gemma_dir.join(mlmodelc);
+        if pkg.exists() || compiled.exists() {
+            continue;
+        }
+        missing.push(format!("{label} ({mlpackage} or {mlmodelc})"));
+    }
+
+    if missing.is_empty() {
+        println!(
+            "OK: Core ML artifacts found under {}",
+            gemma_dir.display()
         );
+        return Ok(());
     }
 
-    #[test]
-    fn builds_redaction_audio_spans_from_timed_segments() {
-        let result = AudioChunkResult {
-            seq: 0,
-            raw_transcript: "My SSN is 482-55-1234 and email me.".to_string(),
-            stt_segments: vec![
-                SttSegment {
-                    start_s: 0.0,
-                    end_s: 0.2,
-                    text: "My".to_string(),
-                },
-                SttSegment {
-                    start_s: 0.2,
-                    end_s: 0.4,
-                    text: "SSN".to_string(),
-                },
-                SttSegment {
-                    start_s: 0.4,
-                    end_s: 0.55,
-                    text: "is".to_string(),
-                },
-                SttSegment {
-                    start_s: 0.55,
-                    end_s: 1.1,
-                    text: "482-55-1234".to_string(),
-                },
-                SttSegment {
-                    start_s: 1.1,
-                    end_s: 1.4,
-                    text: "and email me.".to_string(),
-                },
-            ],
-            masked_transcript: "My SSN is tok_deadbeef and email me.".to_string(),
-            detection: DetectionResult {
-                entities: vec![Entity {
-                    kind: EntityType::Ssn,
-                    value: "482-55-1234".to_string(),
-                    start: 10,
-                    end: 21,
-                    confidence: 0.9,
-                }],
-                risk_level: RiskLevel::High,
-            },
-            policy: PolicyDecision {
-                route: Route::LocalOnly,
-                policy: PolicyName::HipaaBase,
-                rationale: String::new(),
-            },
-            masked: MaskedText {
-                text: "My SSN is tok_deadbeef and email me.".to_string(),
-                token_map: BTreeMap::new(),
-            },
-            route: Route::LocalOnly,
-            audio_out: Vec::new(),
-            processing_ms: 0,
-            trace: Vec::new(),
-        };
-
-        let spans = build_redaction_audio_spans(&result).unwrap();
-        assert_eq!(
-            spans,
-            vec![RedactionAudioSpan {
-                start_s: 0.55,
-                end_s: 1.1,
-                labels: vec!["ssn"],
-            }]
-        );
-    }
-
-    #[test]
-    fn keeps_safe_audio_between_distinct_sensitive_spans() {
-        let result = AudioChunkResult {
-            seq: 0,
-            raw_transcript: "My SSN is 482-55-1234 and my address is 1 Main St.".to_string(),
-            stt_segments: vec![
-                SttSegment {
-                    start_s: 0.0,
-                    end_s: 0.2,
-                    text: "My".to_string(),
-                },
-                SttSegment {
-                    start_s: 0.2,
-                    end_s: 0.4,
-                    text: "SSN".to_string(),
-                },
-                SttSegment {
-                    start_s: 0.4,
-                    end_s: 0.55,
-                    text: "is".to_string(),
-                },
-                SttSegment {
-                    start_s: 0.55,
-                    end_s: 1.1,
-                    text: "482-55-1234".to_string(),
-                },
-                SttSegment {
-                    start_s: 1.1,
-                    end_s: 1.2,
-                    text: "and".to_string(),
-                },
-                SttSegment {
-                    start_s: 1.2,
-                    end_s: 1.4,
-                    text: "my address".to_string(),
-                },
-                SttSegment {
-                    start_s: 1.4,
-                    end_s: 1.8,
-                    text: "is 1 Main St.".to_string(),
-                },
-            ],
-            masked_transcript: "My SSN is tok_deadbeef and my address is [MASKED:address]."
-                .to_string(),
-            detection: DetectionResult {
-                entities: vec![
-                    Entity {
-                        kind: EntityType::Ssn,
-                        value: "482-55-1234".to_string(),
-                        start: 10,
-                        end: 21,
-                        confidence: 0.9,
-                    },
-                    Entity {
-                        kind: EntityType::Address,
-                        value: "1 Main St.".to_string(),
-                        start: 40,
-                        end: 50,
-                        confidence: 0.9,
-                    },
-                ],
-                risk_level: RiskLevel::High,
-            },
-            policy: PolicyDecision {
-                route: Route::LocalOnly,
-                policy: PolicyName::HipaaBase,
-                rationale: String::new(),
-            },
-            masked: MaskedText {
-                text: "My SSN is tok_deadbeef and my address is [MASKED:address].".to_string(),
-                token_map: BTreeMap::new(),
-            },
-            route: Route::LocalOnly,
-            audio_out: Vec::new(),
-            processing_ms: 0,
-            trace: Vec::new(),
-        };
-
-        let spans = build_redaction_audio_spans(&result).unwrap();
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].labels, vec!["ssn"]);
-        assert_eq!(spans[1].labels, vec!["address"]);
-    }
+    Err(anyhow!(
+        "missing Core ML artifacts under {}: {}",
+        gemma_dir.display(),
+        missing.join(", ")
+    ))
 }
 
 fn main() -> ExitCode {

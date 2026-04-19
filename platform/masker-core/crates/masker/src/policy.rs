@@ -6,7 +6,10 @@ use std::collections::HashSet;
 use crate::contracts::{DetectionResult, EntityType, PolicyDecision, PolicyName, Route};
 
 fn is_high_risk_local_only(t: EntityType) -> bool {
-    matches!(t, EntityType::Ssn | EntityType::Mrn)
+    matches!(
+        t,
+        EntityType::Ssn | EntityType::Mrn | EntityType::AccountNumber | EntityType::Pin
+    )
 }
 
 pub fn decide(detection: &DetectionResult, policy_name: PolicyName) -> PolicyDecision {

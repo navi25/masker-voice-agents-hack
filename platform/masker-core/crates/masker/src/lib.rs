@@ -43,6 +43,8 @@ pub mod voice_loop;
 
 #[cfg(feature = "cactus")]
 pub use audio_pipeline::CactusSttBackend;
+#[cfg(feature = "cactus")]
+pub use audio_pipeline::GemmaAudioSttBackend;
 pub use audio_pipeline::{
     AudioChunk, AudioChunkResult, PipelineConfig, SttBackend, SttSegment, SttTranscript, StubStt,
     StubTts, TtsBackend,
@@ -54,6 +56,7 @@ pub use contracts::{
     DetectionResult, Entity, EntityType, MaskedText, PolicyDecision, PolicyName, Route, TraceEvent,
     TraceStage, TurnResult,
 };
+pub use crypto::PersistedState;
 pub use crypto::{Dek, Kek, KeyStore, TokenVault};
 #[cfg(feature = "cactus")]
 pub use detection::CactusFallbackDetector;
@@ -209,5 +212,12 @@ impl StreamingPipeline {
     /// Access the underlying client registry (e.g. to register new keys).
     pub fn registry(&self) -> &ClientRegistry {
         &self.registry
+    }
+
+    pub fn export_state(&self) -> PersistedState {
+        PersistedState {
+            wrapped_deks: self.pipeline_cfg.key_store.list_wrapped_deks(),
+            token_entries: self.pipeline_cfg.token_vault.list(),
+        }
     }
 }

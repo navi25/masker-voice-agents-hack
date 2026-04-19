@@ -7,9 +7,7 @@
 //! STT -> detection -> policy -> masking -> route -> local audio output.
 
 use masker::contracts::RiskLevel;
-use masker::{
-    AudioChunk, AudioChunkResult, EntityType, Route, StreamingPipeline, TraceStage,
-};
+use masker::{AudioChunk, AudioChunkResult, EntityType, Route, StreamingPipeline, TraceStage};
 
 fn run_stream_case(text: &str) -> AudioChunkResult {
     let pipeline = StreamingPipeline::new_with_defaults();
@@ -45,7 +43,12 @@ fn assert_audio_contract(result: &AudioChunkResult) {
 }
 
 fn assert_entity_types(result: &AudioChunkResult, expected: &[EntityType]) {
-    let actual: Vec<_> = result.detection.entities.iter().map(|entity| entity.kind).collect();
+    let actual: Vec<_> = result
+        .detection
+        .entities
+        .iter()
+        .map(|entity| entity.kind)
+        .collect();
     for entity in expected {
         assert!(
             actual.contains(entity),

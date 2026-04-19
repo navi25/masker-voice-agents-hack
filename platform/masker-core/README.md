@@ -150,6 +150,20 @@ find "$CACTUS_STT_MODEL_PATH" -maxdepth 1 \
   \( -name '*.mlpackage' -o -name '*.mlmodelc' \)
 ```
 
+You can also use the CLI helpers (macOS-only):
+
+```bash
+cargo run --release -p masker-cli -- coreml check-gemma-e2b \
+  --gemma-dir "$CACTUS_WEIGHTS_DIR/gemma-4-e2b-it"
+```
+
+If you have a `.mlpackage` bundle you want to validate or compile:
+
+```bash
+cargo run --release -p masker-cli -- coreml metadata --model /path/to/model.mlpackage
+cargo run --release -p masker-cli -- coreml compile --model /path/to/model.mlpackage --out-dir /tmp/coreml
+```
+
 Sample output (trimmed):
 
 ```

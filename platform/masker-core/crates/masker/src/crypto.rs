@@ -222,6 +222,12 @@ pub struct WrappedDek {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedState {
+    pub wrapped_deks: Vec<WrappedDek>,
+    pub token_entries: Vec<TokenEntry>,
+}
+
 /// In-memory key store. In production this would be backed by a database.
 /// Holds the KEK and all wrapped DEKs. DEKs are unwrapped on demand and
 /// cached in plaintext for the lifetime of the process.
@@ -239,6 +245,13 @@ impl KeyStore {
             wrapped: RwLock::new(HashMap::new()),
             cache: RwLock::new(HashMap::new()),
         })
+    }
+
+    pub fn import_wrapped_deks(&self, deks: Vec<WrappedDek>) {
+        let mut wrapped = self.wrapped.write().unwrap();
+        for dek in deks {
+            wrapped.insert(dek.use_case.clone(), dek);
+        }
     }
 
     /// Get or create a DEK for a use case.
@@ -318,6 +331,13 @@ impl TokenVault {
         Arc::new(Self {
             store: RwLock::new(HashMap::new()),
         })
+    }
+
+    pub fn import(&self, entries: Vec<TokenEntry>) {
+        let mut store = self.store.write().unwrap();
+        for entry in entries {
+            store.insert(entry.token.clone(), entry);
+        }
     }
 
     /// Store a token → encrypted value mapping. Returns the token.
