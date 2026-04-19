@@ -1,0 +1,12 @@
+# Core training stack
+unsloth
+transformers==5.5.0
+trl>=0.11.0
+datasets>=2.20.0
+torch>=2.3.0
+
+# GGUF export (Unsloth handles this internally via llama.cpp)
+# No extra dep needed — unsloth bundles the conversion
+
+# Optional: push fine-tuned model to Hugging Face Hub
+huggingface_hub>=0.24.0
