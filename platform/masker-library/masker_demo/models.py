@@ -3,6 +3,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any
 
+from .config import (
+    DEFAULT_STT_MODEL, DEFAULT_LANGUAGE, DEFAULT_POLICY,
+    DEFAULT_PARTIAL_INTERVAL_MS, DEFAULT_SAMPLE_RATE, DEFAULT_MIN_PARTIAL_MS,
+)
+
 
 def to_dict(value: Any) -> Any:
     if is_dataclass(value):
@@ -50,15 +55,15 @@ class SessionConfig:
     session_id: str
     audio_mode: str = "mic"
     audio_path: str | None = None
-    stt_model: str = "small.en"
-    language: str | None = "en"
+    stt_model: str = DEFAULT_STT_MODEL
+    language: str | None = DEFAULT_LANGUAGE
     no_model: bool = False
-    policy_mode: str = "hipaa_safe_mode"
-    partial_interval_ms: int = 900
-    sample_rate: int = 16000
+    policy_mode: str = DEFAULT_POLICY
+    partial_interval_ms: int = DEFAULT_PARTIAL_INTERVAL_MS
+    sample_rate: int = DEFAULT_SAMPLE_RATE
     device: str | int | None = None
     simulate_realtime: bool = True
-    min_partial_ms: int = 700
+    min_partial_ms: int = DEFAULT_MIN_PARTIAL_MS
 
 
 @dataclass

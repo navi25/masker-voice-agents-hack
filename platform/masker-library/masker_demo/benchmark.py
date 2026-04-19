@@ -9,9 +9,7 @@ from pathlib import Path
 
 from .redactor import SessionRedactor
 from .stt import FasterWhisperTranscriber
-
-
-DEFAULT_MODELS = ["tiny.en", "base.en", "small.en"]
+from .config import BENCHMARK_STT_MODELS
 
 
 @dataclass(frozen=True)
@@ -137,7 +135,7 @@ def render_human(results: list[dict]) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Benchmark STT model latency and redaction coverage")
-    parser.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
+    parser.add_argument("--models", nargs="+", default=BENCHMARK_STT_MODELS)
     parser.add_argument("--json", action="store_true")
     return parser
 

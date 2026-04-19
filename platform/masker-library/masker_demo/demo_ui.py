@@ -19,66 +19,7 @@ from rich.text import Text
 
 from .redactor import SessionRedactor
 from .models import DetectedEntity
-
-
-# ── Scenario data ────────────────────────────────────────────────────────────
-
-SCENARIOS: list[dict[str, str]] = [
-    {
-        "id": "healthcare",
-        "name": "Healthcare",
-        "key": "h",
-        "icon": "⚕",
-        "desc": "Patient SSN · DOB · health context",
-        "text": (
-            "Hi, I'm Ravi Kumar, date of birth March 3rd 1989. "
-            "My social security is 123-45-6789. "
-            "I had a heart condition last year and I need a refill for my medication."
-        ),
-        "policy": "hipaa_safe_mode",
-    },
-    {
-        "id": "finance",
-        "name": "Finance",
-        "key": "f",
-        "icon": "₹",
-        "desc": "Credit card · phone · name",
-        "text": (
-            "Hello, this is Maya Shah. "
-            "My credit card number is 4242 4242 4242 4242 "
-            "and my phone number is 415-555-0199. "
-            "Please help me dispute a duplicate payment."
-        ),
-        "policy": "gdpr_safe_mode",
-    },
-    {
-        "id": "personal",
-        "name": "Personal",
-        "key": "p",
-        "icon": "◎",
-        "desc": "Phone · address · email",
-        "text": (
-            "Hi, I'm Jordan Lee. "
-            "You can call me at 650-555-0112 "
-            "and send the package to 42 Market Street, San Francisco, California. "
-            "My email is jordan.lee@example.com."
-        ),
-        "policy": "hipaa_safe_mode",
-    },
-]
-
-ENTITY_COLORS: dict[str, str] = {
-    "PERSON": "bold yellow",
-    "SSN": "bold red",
-    "PHONE": "bold cyan",
-    "EMAIL": "bold bright_blue",
-    "ADDRESS": "bold magenta",
-    "CARD": "bold bright_red",
-    "DOB": "bold green",
-    "GOV_ID": "bold bright_yellow",
-    "MRN": "bold red3",
-    "INSURANCE_ID": "bold orange1",
-}
+from .config import SCENARIOS, ENTITY_COLORS
 
 
 # ── Data classes ─────────────────────────────────────────────────────────────
