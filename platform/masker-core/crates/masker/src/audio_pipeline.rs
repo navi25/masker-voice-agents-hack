@@ -53,6 +53,9 @@ pub struct AudioChunkResult {
     pub seq: u64,
     /// Transcript as received from STT (before masking).
     pub raw_transcript: String,
+    /// Timestamped STT segments when the backend can provide them.
+    #[serde(default)]
+    pub stt_segments: Vec<SttSegment>,
     /// Transcript after masking (what was sent to TTS / model).
     pub masked_transcript: String,
     /// Detection result.
@@ -63,8 +66,8 @@ pub struct AudioChunkResult {
     pub masked: MaskedText,
     /// Route taken.
     pub route: Route,
-    /// Synthesised audio bytes (masked text → speech).
-    /// Empty when route is LocalOnly.
+    /// Synthesised audio bytes for local playback.
+    /// Sensitive routes use the masked/redacted transcript.
     #[serde(skip)]
     pub audio_out: Vec<u8>,
     /// Processing time in milliseconds.
@@ -73,11 +76,25 @@ pub struct AudioChunkResult {
     pub trace: Vec<TraceEvent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SttSegment {
+    pub start_s: f64,
+    pub end_s: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SttTranscript {
+    pub text: String,
+    #[serde(default)]
+    pub segments: Vec<SttSegment>,
+}
+
 // ── STT / TTS traits ──────────────────────────────────────────────────────────
 
 /// Speech-to-text backend.
 pub trait SttBackend: Send + Sync {
-    fn transcribe(&self, audio: &[u8]) -> anyhow::Result<String>;
+    fn transcribe(&self, audio: &[u8]) -> anyhow::Result<SttTranscript>;
 }
 
 /// Text-to-speech backend.
@@ -91,8 +108,11 @@ pub trait TtsBackend: Send + Sync {
 /// Used for testing and demo mode where "audio" is actually text.
 pub struct StubStt;
 impl SttBackend for StubStt {
-    fn transcribe(&self, audio: &[u8]) -> anyhow::Result<String> {
-        Ok(String::from_utf8_lossy(audio).into_owned())
+    fn transcribe(&self, audio: &[u8]) -> anyhow::Result<SttTranscript> {
+        Ok(SttTranscript {
+            text: String::from_utf8_lossy(audio).into_owned(),
+            segments: Vec::new(),
+        })
     }
 }
 
@@ -161,7 +181,7 @@ fn default_stt_prompt(model_path: &str) -> Option<String> {
 
 #[cfg(feature = "cactus")]
 impl SttBackend for CactusSttBackend {
-    fn transcribe(&self, audio: &[u8]) -> anyhow::Result<String> {
+    fn transcribe(&self, audio: &[u8]) -> anyhow::Result<SttTranscript> {
         let envelope = self
             .model
             .transcribe_pcm(audio, self.prompt.as_deref(), self.options_json.as_deref())
@@ -171,7 +191,18 @@ impl SttBackend for CactusSttBackend {
         if transcript.is_empty() {
             anyhow::bail!("cactus transcribe returned an empty transcript");
         }
-        Ok(transcript)
+        Ok(SttTranscript {
+            text: transcript,
+            segments: envelope
+                .segments
+                .into_iter()
+                .map(|segment| SttSegment {
+                    start_s: segment.start,
+                    end_s: segment.end,
+                    text: segment.text,
+                })
+                .collect(),
+        })
     }
 }
 
@@ -208,7 +239,8 @@ pub fn process_chunk(
     let mut trace: Vec<TraceEvent> = Vec::new();
 
     // ── Stage 1: STT ─────────────────────────────────────────────────────────
-    let raw_transcript = config.stt.transcribe(&chunk.data)?;
+    let stt_result = config.stt.transcribe(&chunk.data)?;
+    let raw_transcript = stt_result.text;
     trace.push(event(
         TraceStage::Stt,
         format!(
@@ -302,12 +334,16 @@ pub fn process_chunk(
     // ── Stage 5: TTS ──────────────────────────────────────────────────────────
     let audio_out = match route {
         Route::LocalOnly => {
+            let audio = config.tts.synthesise(&masked_transcript)?;
             trace.push(event(
                 TraceStage::Routing,
-                "local-only: TTS skipped, audio not forwarded",
+                format!(
+                    "local-only: synthesised {} bytes from masked transcript; audio kept on-device",
+                    audio.len()
+                ),
                 t0.elapsed().as_secs_f64() * 1000.0,
             ));
-            Vec::new()
+            audio
         }
         Route::MaskedSend => {
             let audio = config.tts.synthesise(&masked_transcript)?;
@@ -338,6 +374,7 @@ pub fn process_chunk(
     Ok(AudioChunkResult {
         seq: chunk.seq,
         raw_transcript,
+        stt_segments: stt_result.segments,
         masked_transcript,
         detection,
         policy: policy_decision,
@@ -399,7 +436,8 @@ mod tests {
         let client = ClientRegistry::with_defaults().resolve(None);
         let result = process_chunk(&chunk(1, "My SSN is 482-55-1234."), &client, &cfg).unwrap();
         assert_eq!(result.route, Route::LocalOnly);
-        assert!(result.audio_out.is_empty());
+        assert!(!result.audio_out.is_empty());
+        assert_eq!(result.audio_out, result.masked_transcript.as_bytes());
     }
 
     #[test]
@@ -449,10 +487,11 @@ mod tests {
     fn ssn_is_vault_tokenized() {
         let cfg = make_config();
         let client = ClientRegistry::with_defaults().resolve(None);
-        // SSN triggers local-only so no audio, but masking still runs.
+        // SSN triggers local-only, but local playback should use masked audio.
         let result = process_chunk(&chunk(5, "My SSN is 482-55-1234."), &client, &cfg).unwrap();
         // The masked transcript should contain a vault token, not the raw SSN.
         assert!(!result.masked_transcript.contains("482-55-1234"));
+        assert_eq!(result.audio_out, result.masked_transcript.as_bytes());
     }
 
     #[test]

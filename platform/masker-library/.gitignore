@@ -1,0 +1,5 @@
+.masker_safe_logs/
+__pycache__/
+.venv/
+*.pyc
+*.wav

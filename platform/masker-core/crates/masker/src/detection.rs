@@ -95,13 +95,17 @@ static PATTERNS: Lazy<Vec<Pat>> = Lazy::new(|| {
 
 static HEALTH_KEYWORDS: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)\b(chest pain|diabetes|cancer|asthma|prescription|medication|symptoms?|diagnosis|insurance|patient|medical|hipaa|surgery|allergy|allergies|blood pressure|heart attack|depression|anxiety)\b",
+        r"(?i)\b(chest pain|diabetes|cancer|asthma|prescription|medication|symptoms?|diagnosis|insurance|patient|medical|hipaa|surgery|allergy|allergies|blood pressure|heart attack|depression|anxiety|parkinson(?:'s|s)?)\b",
     )
     .unwrap()
 });
 
 static SSN_CUES: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\b(ssn|s\s*s\s*n|sns|social security(?: number)?)\b").unwrap());
+
+static POSSESSIVE_SSN_CUES: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(my|our)\s+(ssn|s\s*s\s*n|social security(?: number)?|s\s*n|sn)\b").unwrap()
+});
 
 static CARD_CUES: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
@@ -112,6 +116,10 @@ static CARD_CUES: Lazy<Regex> = Lazy::new(|| {
 
 static CVV_CUES: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(?i)\b(c\s*v\s*v|cvv|security code)\b").unwrap());
+
+static ADDRESS_CUES: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)\b(address|live at|lives at|stay at|staying at|located at)\b").unwrap()
+});
 
 static WORD_TOKENS: Lazy<Regex> = Lazy::new(|| Regex::new(r"[A-Za-z0-9']+").unwrap());
 
@@ -177,7 +185,9 @@ fn detect_regex(text: &str) -> DetectionResult {
     }
 
     entities.extend(find_spoken_ssn_entities(text));
+    entities.extend(find_possessive_ssn_cue_entities(text));
     entities.extend(find_contextual_financial_entities(text));
+    entities.extend(find_contextual_address_entities(text));
     dedupe_entities(&mut entities);
 
     let identifying: Vec<Entity> = entities
@@ -203,9 +213,37 @@ fn find_spoken_ssn_entities(text: &str) -> Vec<Entity> {
         };
 
         if let Some(entity) =
-            parse_number_after_cue(text, &tokens, start_idx, EntityType::Ssn, 8, 9, 0.8)
+            parse_number_after_cue(text, &tokens, start_idx, EntityType::Ssn, 4, 9, 0.8)
         {
             entities.push(entity);
+        }
+    }
+
+    entities
+}
+
+fn find_possessive_ssn_cue_entities(text: &str) -> Vec<Entity> {
+    let tokens = tokenize_words(text);
+    let mut entities = Vec::new();
+
+    for cue in POSSESSIVE_SSN_CUES.find_iter(text) {
+        let parsed = tokens
+            .iter()
+            .position(|token| token.start >= cue.end())
+            .and_then(|start_idx| {
+                parse_number_after_cue(text, &tokens, start_idx, EntityType::Ssn, 1, 9, 0.7)
+            });
+
+        if let Some(entity) = parsed {
+            entities.push(entity);
+        } else {
+            entities.push(Entity {
+                kind: EntityType::Ssn,
+                value: cue.as_str().to_string(),
+                start: cue.start(),
+                end: cue.end(),
+                confidence: 0.65,
+            });
         }
     }
 
@@ -236,6 +274,23 @@ fn find_contextual_financial_entities(text: &str) -> Vec<Entity> {
         if let Some(entity) =
             parse_number_after_cue(text, &tokens, start_idx, EntityType::Other, 3, 4, 0.75)
         {
+            entities.push(entity);
+        }
+    }
+
+    entities
+}
+
+fn find_contextual_address_entities(text: &str) -> Vec<Entity> {
+    let tokens = tokenize_words(text);
+    let mut entities = Vec::new();
+
+    for cue in ADDRESS_CUES.find_iter(text) {
+        let Some(start_idx) = tokens.iter().position(|token| token.start >= cue.end()) else {
+            continue;
+        };
+
+        if let Some(entity) = parse_address_after_cue(text, &tokens, start_idx) {
             entities.push(entity);
         }
     }
@@ -325,6 +380,59 @@ fn parse_number_after_cue(
     })
 }
 
+fn parse_address_after_cue(
+    text: &str,
+    tokens: &[WordToken<'_>],
+    start_idx: usize,
+) -> Option<Entity> {
+    let mut start = None;
+    let mut end = None;
+    let mut collected = 0usize;
+    let mut has_digit = false;
+    let mut looks_address_like = false;
+
+    for token in tokens.iter().skip(start_idx).take(6) {
+        if !looks_address_like && is_spoken_number_filler(&token.normalized) {
+            continue;
+        }
+
+        if start.is_none() {
+            start = Some(token.start);
+        }
+        end = Some(token.end);
+        collected += 1;
+
+        if token.raw.chars().any(|c| c.is_ascii_digit()) {
+            has_digit = true;
+        }
+        if is_address_designator(&token.normalized) || has_compact_street_suffix(&token.normalized)
+        {
+            looks_address_like = true;
+        }
+
+        if collected >= 2 && looks_address_like && has_digit {
+            break;
+        }
+    }
+
+    let (start, end) = match (start, end) {
+        (Some(start), Some(end)) => (start, end),
+        _ => return None,
+    };
+
+    if !has_digit || !looks_address_like {
+        return None;
+    }
+
+    Some(Entity {
+        kind: EntityType::Address,
+        value: text[start..end].to_string(),
+        start,
+        end,
+        confidence: 0.75,
+    })
+}
+
 fn ssn_digit_piece_len(raw: &str, normalized: &str) -> Option<usize> {
     match normalized {
         "zero" | "oh" | "o" | "one" | "two" | "three" | "four" | "five" | "six" | "seven"
@@ -336,6 +444,48 @@ fn ssn_digit_piece_len(raw: &str, normalized: &str) -> Option<usize> {
 
 fn is_spoken_number_separator(word: &str) -> bool {
     matches!(word, "dash" | "hyphen" | "minus")
+}
+
+fn is_address_designator(word: &str) -> bool {
+    matches!(
+        word,
+        "street"
+            | "st"
+            | "avenue"
+            | "ave"
+            | "road"
+            | "rd"
+            | "boulevard"
+            | "blvd"
+            | "drive"
+            | "dr"
+            | "lane"
+            | "ln"
+            | "way"
+            | "place"
+            | "pl"
+            | "court"
+            | "ct"
+            | "north"
+            | "south"
+            | "east"
+            | "west"
+            | "n"
+            | "s"
+            | "e"
+            | "w"
+            | "ne"
+            | "nw"
+            | "se"
+            | "sw"
+    )
+}
+
+fn has_compact_street_suffix(word: &str) -> bool {
+    word.chars().any(|c| c.is_ascii_digit())
+        && ["st", "ave", "rd", "blvd", "dr", "ln", "way", "pl", "ct"]
+            .iter()
+            .any(|suffix| word.ends_with(suffix))
 }
 
 fn is_spoken_number_filler(word: &str) -> bool {
@@ -658,6 +808,89 @@ mod regex_tests {
             .iter()
             .any(|entity| entity.kind == EntityType::Other));
         assert_eq!(detection.risk_level, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn detects_short_ssn_after_explicit_cue() {
+        let detection = detect("My SSN is 01234.");
+
+        assert!(detection
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityType::Ssn));
+        assert_eq!(detection.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn detects_possessive_ssn_cue_without_digits() {
+        let detection = detect("My SSN is here with me.");
+
+        assert!(detection
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityType::Ssn));
+        assert_eq!(detection.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn detects_possessive_sn_cue_without_digits() {
+        let detection = detect("My SN is here with me.");
+
+        assert!(detection
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityType::Ssn));
+        assert_eq!(detection.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn detects_spoken_digits_after_possessive_sn_cue() {
+        let detection = detect("My SN is one eight four six seven nine.");
+
+        assert!(detection
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityType::Ssn));
+        assert_eq!(detection.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn detects_health_context_for_parkinsons() {
+        let detection = detect("I might have Parkinson's and I need help.");
+
+        assert!(detection
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityType::HealthContext));
+        assert_eq!(detection.risk_level, RiskLevel::Low);
+    }
+
+    #[test]
+    fn detects_contextual_address_with_compact_street_suffix() {
+        let detection = detect("I stay at 108169PL SW.");
+
+        assert!(detection
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityType::Address));
+        assert_eq!(detection.risk_level, RiskLevel::Medium);
+    }
+
+    #[test]
+    fn detects_noisy_healthcare_transcript_as_high_risk() {
+        let detection = detect(
+            "Hello, this is Navain Dr. My SSN is 01234 and I am struggling to remember anything so I might have some Parkinson's and I stay at 108169PL SW.",
+        );
+
+        assert!(detection
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityType::Ssn));
+        assert!(detection
+            .entities
+            .iter()
+            .any(|entity| entity.kind == EntityType::HealthContext));
+        assert_eq!(detection.risk_level, RiskLevel::High);
     }
 }
 

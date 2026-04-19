@@ -92,9 +92,62 @@ cactus download openai/whisper-small
 cactus download google/gemma-4-E2B-it
 
 # macOS live audio smoke test (records 5s from the default mic)
+# Gemma 4 detection auto-loads from standard Cactus weights locations when present.
 export CACTUS_STT_MODEL_PATH="$(brew --prefix cactus)/libexec/weights/whisper-small"
-export CACTUS_DETECTION_MODEL_PATH="$(brew --prefix cactus)/libexec/weights/gemma-4-e2b-it"
 cargo run --release --features cactus -p masker-cli -- live --seconds 5
+```
+
+## Apple NPU setup for Cactus
+
+If you see warnings like:
+
+```text
+[WARN] [npu] [gemma4-vision] vision_encoder.mlpackage not found
+[WARN] [npu] [gemma4-audio] audio_encoder.mlpackage not found
+[WARN] [npu] [gemma4] model.mlpackage not found
+```
+
+then Cactus is running, but it is falling back to CPU because the selected
+weights folder does not contain the Core ML packages needed for Apple
+acceleration.
+
+For this repo, the easiest setup is:
+
+```bash
+cd platform/masker-core
+source scripts/cactus-npu-env.sh
+```
+
+That script prefers a local Cactus checkout at
+`$HOME/Developer/ai/cactus/weights` when it contains `.mlpackage` files, then
+falls back to Homebrew weights. It also exports:
+
+```bash
+CACTUS_WEIGHTS_DIR
+CACTUS_STT_MODEL_PATH
+CACTUS_DETECTION_MODEL_PATH
+CACTUS_ANE_COMPUTE_UNITS=cpu_and_ne
+CACTUS_ANE_PREFILL_COMPUTE_UNITS=cpu_and_ne
+```
+
+Current practical status:
+
+- `parakeet-tdt-0.6b-v3/model.mlpackage` enables Apple-accelerated STT when it
+  is present in the chosen weights directory.
+- `gemma-4-e2b-it/audio_encoder.mlpackage` and
+  `gemma-4-e2b-it/vision_encoder.mlpackage` enable Apple-accelerated Gemma
+  multimodal encoders when present.
+- `gemma-4-e2b-it/model.mlpackage` is required for Gemma NPU prefill. If that
+  file is missing, Gemma completion/prefill still runs on CPU even though the
+  encoders can be accelerated.
+
+You can verify what is available with:
+
+```bash
+find "$CACTUS_WEIGHTS_DIR/gemma-4-e2b-it" -maxdepth 1 \
+  \( -name '*.mlpackage' -o -name '*.mlmodelc' \)
+find "$CACTUS_STT_MODEL_PATH" -maxdepth 1 \
+  \( -name '*.mlpackage' -o -name '*.mlmodelc' \)
 ```
 
 Sample output (trimmed):
@@ -138,7 +191,7 @@ adoption path.
 
 1. records raw PCM with `ffmpeg` or normalizes an existing audio file
 2. transcribes locally with Cactus STT
-3. runs detection with a Cactus-backed classifier when configured
+3. runs detection with Gemma 4 automatically when local Cactus weights are available
 4. falls back to regex detection if the model path is missing or inference fails
 5. applies the existing policy, masking, routing, and trace pipeline
 
@@ -150,7 +203,15 @@ cargo run --release --features cactus -p masker-cli -- live --seconds 5
 # interactive microphone mode, stops on Enter and prints the final transcript
 cargo run --release --features cactus -p masker-cli -- live --interactive
 
-# optionally enable model-backed detection; regex stays as the fallback
+# same command, but choose the built-in Whisper STT preset directly
+cargo run --release --features cactus -p masker-cli -- \
+  live --interactive --stt whisper
+
+# explicitly force the built-in Gemma 4 detector preset
+cargo run --release --features cactus -p masker-cli -- \
+  live --interactive --stt whisper --detect gemma4
+
+# override detection with a custom model path; regex stays as the fallback
 export CACTUS_DETECTION_MODEL_PATH="$(brew --prefix cactus)/libexec/weights/gemma-4-e2b-it"
 
 # use a prerecorded clip instead of recording
@@ -165,12 +226,15 @@ Notes:
 - File-based testing works anywhere `ffmpeg` works.
 - `CACTUS_STT_MODEL_PATH` is required for live transcription. `openai/whisper-small`
   is the recommended default for this repo.
-- Detection uses `CACTUS_DETECTION_MODEL_PATH`, then `CACTUS_MODEL_PATH`, and
-  otherwise drops to the built-in regex detector. `google/gemma-4-E2B-it` is
-  the recommended local audio-aware detector model.
+- Detection auto-loads `google/gemma-4-E2B-it` from the standard Cactus
+  weights directories when it is installed. `--detect gemma4` forces that
+  preset, `CACTUS_DETECTION_MODEL_PATH` / `CACTUS_MODEL_PATH` override it, and
+  regex remains the fallback if model loading or inference fails.
 - `--interactive` mirrors the `cactus transcribe` UX more closely: it lists
   microphones, listens until Enter, prints the final transcript, and still
   emits the structured JSON result for SDK wrappers.
+- `--play-input` replays the captured WAV with `afplay`, and `--play-output`
+  reads the masked/redacted result aloud locally with `say`.
 - If the default mic is not the first AVFoundation device, list inputs with:
 
 ```bash
