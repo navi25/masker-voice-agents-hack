@@ -10,7 +10,12 @@ import { createClient } from "@/lib/supabase/server";
 async function getOverview() {
   // Server-side: call our own API route via internal fetch
   // Use Supabase directly to avoid absolute URL requirement
-  const supabase = createClient();
+  let supabase;
+  try {
+    supabase = createClient();
+  } catch {
+    return null;
+  }
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return null;
 
