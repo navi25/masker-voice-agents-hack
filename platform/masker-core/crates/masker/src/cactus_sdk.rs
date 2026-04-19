@@ -11,10 +11,19 @@ use crate::backends::BackendError;
 const DEFAULT_RESPONSE_BUFFER_SIZE: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CactusTranscriptionSegment {
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CactusResponseEnvelope {
     pub success: bool,
     pub error: Option<String>,
     pub response: String,
+    #[serde(default)]
+    pub segments: Vec<CactusTranscriptionSegment>,
     #[serde(default)]
     pub confidence: Option<f32>,
 }

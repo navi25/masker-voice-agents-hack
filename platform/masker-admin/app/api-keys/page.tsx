@@ -6,7 +6,7 @@ import { StatusChip } from "@/components/ui/StatusChip";
 import { Button } from "@/components/ui/Button";
 import { Plus, RotateCcw, Trash2, Copy, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ApiKey } from "@/lib/supabase/types";
+import type { ApiKey } from "@/lib/mock-data";
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -62,7 +62,7 @@ export default function ApiKeysPage() {
     try {
       const res = await fetch(`/api/keys/${id}/rotate`, { method: "POST" });
       const updated = await res.json();
-      if (updated.full_key) setNewKeyValue(updated.full_key);
+      if (updated.fullKey) setNewKeyValue(updated.fullKey);
       setKeys(prev => prev.map(k => k.id === id ? updated : k));
     } finally { setPending(null); }
   }
@@ -73,7 +73,7 @@ export default function ApiKeysPage() {
     try {
       const res = await fetch("/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label: newLabel, permissions: ["sessions:read", "sessions:write", "audit:read"], environment: "production" }) });
       const created = await res.json();
-      if (created.full_key) setNewKeyValue(created.full_key);
+      if (created.fullKey) setNewKeyValue(created.fullKey);
       setKeys(prev => [created, ...prev]);
       setNewLabel("");
       setShowCreate(false);
@@ -148,7 +148,7 @@ export default function ApiKeysPage() {
                   </div>
                 </td>
                 <td className="px-5 py-3.5 text-[#6b7280]">{k.environment}</td>
-                <td className="px-5 py-3.5 text-[#6b7280]">{k.last_used_at ? new Date(k.last_used_at).toLocaleDateString() : "Never"}</td>
+                <td className="px-5 py-3.5 text-[#6b7280]">{k.lastUsed === "Never" ? "Never" : new Date(k.lastUsed).toLocaleDateString()}</td>
                 <td className="px-5 py-3.5"><StatusChip status={k.status} /></td>
                 <td className="px-5 py-3.5">
                   {k.status === "active" && (

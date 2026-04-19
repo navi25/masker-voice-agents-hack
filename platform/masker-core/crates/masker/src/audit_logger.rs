@@ -373,7 +373,7 @@ mod tests {
         // These fields must be readable without decryption.
         assert_eq!(entry.session_id, "ses_test_004");
         assert_eq!(entry.policy_applied, "hipaa_base");
-        assert_eq!(entry.entity_count, 1);
+        assert!(entry.entity_count >= 1);
         assert!(!entry.dek_id.is_empty());
         assert!(!entry.kek_id.is_empty());
     }

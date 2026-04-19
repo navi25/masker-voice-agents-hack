@@ -3,10 +3,9 @@
 import { useState, useEffect } from "react";
 import { PageShell } from "@/components/layout/PageShell";
 import { StatusChip } from "@/components/ui/StatusChip";
-
 import { RotateCcw, Ban, ArrowRight } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { KmsKey } from "@/lib/supabase/types";
+import type { KmsKey } from "@/lib/mock-data";
 
 function Skeleton() {
   return (
@@ -108,14 +107,14 @@ export default function KmsPage() {
           </thead>
           <tbody>
             {loading ? <Skeleton /> : keys.length === 0 ? (
-              <tr><td colSpan={7} className="px-5 py-12 text-center text-[13px] text-[#9ca3af]">No KMS keys — complete onboarding to provision one</td></tr>
+              <tr><td colSpan={7} className="px-5 py-12 text-center text-[13px] text-[#9ca3af]">No KMS keys found</td></tr>
             ) : keys.map(k => (
               <tr key={k.id} className="border-b border-[#f9fafb] last:border-0 hover:bg-[#fafafa]">
                 <td className="px-5 py-3.5 font-mono text-[#0d0f12]">{k.alias}</td>
                 <td className="px-5 py-3.5 text-[#6b7280]">{k.scope}</td>
                 <td className="px-5 py-3.5 font-mono text-[#9ca3af]">{k.region}</td>
-                <td className="px-5 py-3.5 text-[#6b7280]">{k.rotation_cadence}</td>
-                <td className="px-5 py-3.5 text-[#6b7280]">{new Date(k.last_rotated_at).toLocaleDateString()}</td>
+                <td className="px-5 py-3.5 text-[#6b7280]">{k.rotationCadence}</td>
+                <td className="px-5 py-3.5 text-[#6b7280]">{new Date(k.lastRotated).toLocaleDateString()}</td>
                 <td className="px-5 py-3.5"><StatusChip status={k.status} /></td>
                 <td className="px-5 py-3.5">
                   <div className="flex items-center gap-1.5">

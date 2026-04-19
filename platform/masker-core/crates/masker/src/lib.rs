@@ -44,7 +44,8 @@ pub mod voice_loop;
 #[cfg(feature = "cactus")]
 pub use audio_pipeline::CactusSttBackend;
 pub use audio_pipeline::{
-    AudioChunk, AudioChunkResult, PipelineConfig, SttBackend, StubStt, StubTts, TtsBackend,
+    AudioChunk, AudioChunkResult, PipelineConfig, SttBackend, SttSegment, SttTranscript, StubStt,
+    StubTts, TtsBackend,
 };
 pub use audit_logger::{AdminSink, AuditEntry, AuditLogger, AuditRecord, InMemorySink, StdoutSink};
 pub use backends::{default_backend, GemmaBackend, StubBackend};

@@ -31,6 +31,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[cfg(feature = "cactus")]
 use masker::backends::LocalCactusBackend;
 use masker::backends::{GeminiCloudBackend, GemmaBackend, StubBackend};
+#[cfg(feature = "cactus")]
+use masker::{contracts::EntityType, SttSegment};
 use masker::{
     contracts::{DetectionResult, PolicyName, Route, TraceEvent, TraceStage},
     AudioChunk, AudioChunkResult, MaskMode, Router, StreamingPipeline, Tracer, VoiceLoop,
@@ -75,6 +77,24 @@ impl From<CliMaskMode> for MaskMode {
             CliMaskMode::Token => MaskMode::Token,
         }
     }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum LiveOutputFormat {
+    Human,
+    Json,
+    PrettyJson,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum SttPreset {
+    Whisper,
+    Parakeet,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum DetectionPreset {
+    Gemma4,
 }
 
 #[derive(Subcommand, Debug)]
@@ -182,14 +202,35 @@ enum Command {
         #[arg(long)]
         stt_model_path: Option<String>,
 
+        /// Use a built-in STT preset instead of a full model path.
+        #[arg(long, value_enum, conflicts_with = "stt_model_path")]
+        stt: Option<SttPreset>,
+
         /// Override the detection model path for this run. Falls back to
         /// CACTUS_DETECTION_MODEL_PATH, then CACTUS_MODEL_PATH.
         #[arg(long)]
         detection_model_path: Option<String>,
 
+        /// Use a built-in detection preset instead of a full model path.
+        #[arg(long, value_enum, conflicts_with = "detection_model_path")]
+        detect: Option<DetectionPreset>,
+
         /// Keep the captured raw PCM file on disk after processing.
         #[arg(long, default_value_t = false)]
         keep_audio: bool,
+
+        /// Play the captured input audio after processing.
+        #[arg(long, default_value_t = false)]
+        play_input: bool,
+
+        /// Play local output audio: original audio for safe spans, spoken
+        /// redactions only where sensitive content was detected.
+        #[arg(long, default_value_t = false)]
+        play_output: bool,
+
+        /// How to render the result.
+        #[arg(long, value_enum, default_value_t = LiveOutputFormat::Human)]
+        output: LiveOutputFormat,
     },
 }
 
@@ -569,6 +610,567 @@ fn build_live_pipeline() -> Result<(StreamingPipeline, LiveDetectionStatus)> {
     Ok((pipeline, detection_status))
 }
 
+#[cfg(feature = "cactus")]
+fn detect_brew_prefix(formula: &str) -> Option<PathBuf> {
+    let output = ProcessCommand::new("brew")
+        .args(["--prefix", formula])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let prefix = String::from_utf8(output.stdout).ok()?;
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+#[cfg(feature = "cactus")]
+fn stt_preset_dir_name(preset: SttPreset) -> &'static str {
+    match preset {
+        SttPreset::Whisper => "whisper-small",
+        SttPreset::Parakeet => "parakeet-tdt-0.6b-v3",
+    }
+}
+
+#[cfg(feature = "cactus")]
+fn stt_preset_model_name(preset: SttPreset) -> &'static str {
+    match preset {
+        SttPreset::Whisper => "openai/whisper-small",
+        SttPreset::Parakeet => "nvidia/parakeet-tdt-0.6b-v3",
+    }
+}
+
+#[cfg(feature = "cactus")]
+fn detection_preset_dir_name(preset: DetectionPreset) -> &'static str {
+    match preset {
+        DetectionPreset::Gemma4 => "gemma-4-e2b-it",
+    }
+}
+
+#[cfg(feature = "cactus")]
+fn detection_preset_model_name(preset: DetectionPreset) -> &'static str {
+    match preset {
+        DetectionPreset::Gemma4 => "google/gemma-4-E2B-it",
+    }
+}
+
+#[cfg(feature = "cactus")]
+fn resolve_stt_preset_path(preset: SttPreset) -> Result<String> {
+    let dir_name = stt_preset_dir_name(preset);
+    let mut roots = Vec::new();
+
+    if let Ok(weights_dir) = std::env::var("CACTUS_WEIGHTS_DIR") {
+        roots.push(PathBuf::from(weights_dir));
+    }
+    if let Some(prefix) = detect_brew_prefix("cactus") {
+        roots.push(prefix.join("libexec").join("weights"));
+    }
+    roots.push(PathBuf::from("/opt/homebrew/opt/cactus/libexec/weights"));
+    roots.push(PathBuf::from("/usr/local/opt/cactus/libexec/weights"));
+
+    for root in roots {
+        let candidate = root.join(dir_name);
+        if candidate.join("config.txt").is_file() {
+            return Ok(candidate.display().to_string());
+        }
+    }
+
+    Err(anyhow!(
+        "could not locate STT preset `{}`. Run `cactus download {}` or pass `--stt-model-path /full/path/to/model`.",
+        match preset {
+            SttPreset::Whisper => "whisper",
+            SttPreset::Parakeet => "parakeet",
+        },
+        stt_preset_model_name(preset)
+    ))
+}
+
+#[cfg(feature = "cactus")]
+fn resolve_detection_preset_path(preset: DetectionPreset) -> Result<String> {
+    let dir_name = detection_preset_dir_name(preset);
+    let mut roots = Vec::new();
+
+    if let Ok(weights_dir) = std::env::var("CACTUS_WEIGHTS_DIR") {
+        roots.push(PathBuf::from(weights_dir));
+    }
+    if let Some(prefix) = detect_brew_prefix("cactus") {
+        roots.push(prefix.join("libexec").join("weights"));
+    }
+    roots.push(PathBuf::from("/opt/homebrew/opt/cactus/libexec/weights"));
+    roots.push(PathBuf::from("/usr/local/opt/cactus/libexec/weights"));
+
+    for root in roots {
+        let candidate = root.join(dir_name);
+        if candidate.join("config.txt").is_file() {
+            return Ok(candidate.display().to_string());
+        }
+    }
+
+    Err(anyhow!(
+        "could not locate detection preset `gemma4`. Run `cactus download {}` or pass `--detection-model-path /full/path/to/model`.",
+        detection_preset_model_name(preset)
+    ))
+}
+
+#[cfg(feature = "cactus")]
+fn resolve_default_detection_model_path() -> Option<String> {
+    resolve_detection_preset_path(DetectionPreset::Gemma4).ok()
+}
+
+#[cfg(feature = "cactus")]
+fn format_entity_list(result: &AudioChunkResult) -> String {
+    if result.detection.entities.is_empty() {
+        return "none".to_string();
+    }
+
+    result
+        .detection
+        .entities
+        .iter()
+        .map(|entity| entity.kind.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[cfg(feature = "cactus")]
+fn repeated_segment_warning(text: &str) -> Option<String> {
+    let segments: Vec<String> = text
+        .split(['.', '!', '?'])
+        .map(|segment| segment.trim())
+        .filter(|segment| segment.len() >= 12)
+        .map(|segment| segment.to_ascii_lowercase())
+        .collect();
+
+    let mut best_segment = None;
+    let mut best_run = 1usize;
+    let mut current_run = 1usize;
+
+    for pair in segments.windows(2) {
+        if pair[0] == pair[1] {
+            current_run += 1;
+            if current_run > best_run {
+                best_run = current_run;
+                best_segment = Some(pair[1].clone());
+            }
+        } else {
+            current_run = 1;
+        }
+    }
+
+    if best_run >= 4 {
+        return Some(format!(
+            "repeated transcript segment {}x detected: \"{}\". This usually means Whisper kept decoding trailing silence or room noise after you finished speaking.",
+            best_run,
+            truncate(best_segment.as_deref().unwrap_or(""), 72)
+        ));
+    }
+
+    None
+}
+
+#[cfg(feature = "cactus")]
+fn print_live_human_summary(
+    session: &str,
+    result: &AudioChunkResult,
+    total_ms: f64,
+    signal: PcmSignalStats,
+    duration_ms: u32,
+    detection_status: &LiveDetectionStatus,
+    stt_model_path: Option<&str>,
+) {
+    let bar = "============================================================";
+    println!("{bar}");
+    println!("MASKER LIVE RESULT");
+    println!("{bar}");
+    println!("Session    : {session}");
+    println!("Route      : {}", result.route.as_str());
+    println!("Risk       : {}", result.detection.risk_level.as_str());
+    println!("Entities   : {}", format_entity_list(result));
+    println!("Policy     : {}", result.policy.policy.as_str());
+    println!("Latency    : {:.0} ms", total_ms);
+    println!(
+        "Audio      : {} ms, peak_abs={}, rms={:.1}",
+        duration_ms, signal.peak_abs, signal.rms
+    );
+    println!(
+        "STT        : {}",
+        stt_model_path.unwrap_or("CACTUS_STT_MODEL_PATH not set")
+    );
+    println!(
+        "Detection  : {}{}",
+        detection_status.engine,
+        if detection_status.active {
+            ""
+        } else {
+            " (regex fallback only)"
+        }
+    );
+    if let Some(err) = &detection_status.init_error {
+        println!("Init Error : {}", truncate(err, 120));
+    }
+    println!();
+    println!("Transcript");
+    println!("{}", result.raw_transcript);
+    if result.masked_transcript != result.raw_transcript {
+        println!();
+        println!("Masked");
+        println!("{}", result.masked_transcript);
+    }
+    if let Some(warning) = repeated_segment_warning(&result.raw_transcript) {
+        println!();
+        println!("Warning");
+        println!("{warning}");
+        println!(
+            "Try stopping recording immediately after you finish speaking, or use `--seconds 8` for a bounded capture."
+        );
+    }
+    println!();
+    println!("Trace");
+    for event in &result.trace {
+        println!(
+            "  {:>6.0} ms  {:<10} {}",
+            event.elapsed_ms,
+            event.stage.as_str(),
+            event.message
+        );
+    }
+}
+
+#[cfg(feature = "cactus")]
+fn placeholder_to_spoken_redaction(kind: &str) -> String {
+    format!("redacted {}", kind.replace('_', " "))
+}
+
+#[cfg(feature = "cactus")]
+fn speech_safe_output_text(result: &AudioChunkResult) -> String {
+    let mut text = result.masked_transcript.clone();
+
+    for token in result.masked.token_map.keys() {
+        text = text.replace(token, "redacted sensitive information");
+    }
+
+    let mut spoken = String::new();
+    let mut rest = text.as_str();
+
+    loop {
+        let Some(start) = rest.find("[MASKED:") else {
+            spoken.push_str(rest);
+            break;
+        };
+
+        spoken.push_str(&rest[..start]);
+        let after = &rest[start + "[MASKED:".len()..];
+        let Some(end) = after.find(']') else {
+            spoken.push_str(&rest[start..]);
+            break;
+        };
+
+        spoken.push_str(&placeholder_to_spoken_redaction(&after[..end]));
+        rest = &after[end + 1..];
+    }
+
+    spoken
+}
+
+#[cfg(feature = "cactus")]
+#[derive(Debug, Clone, PartialEq)]
+struct AlignedSttSegment {
+    start_s: f64,
+    end_s: f64,
+    transcript_start: usize,
+    transcript_end: usize,
+}
+
+#[cfg(feature = "cactus")]
+#[derive(Debug, Clone, PartialEq)]
+struct RedactionAudioSpan {
+    start_s: f64,
+    end_s: f64,
+    labels: Vec<&'static str>,
+}
+
+#[cfg(feature = "cactus")]
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_lowercase()
+        .find(&needle.to_ascii_lowercase())
+}
+
+#[cfg(feature = "cactus")]
+fn align_stt_segments(transcript: &str, segments: &[SttSegment]) -> Vec<AlignedSttSegment> {
+    let mut cursor = 0usize;
+    let mut aligned = Vec::new();
+
+    for segment in segments {
+        let needle = segment.text.trim();
+        if needle.is_empty() {
+            continue;
+        }
+
+        let start = find_ascii_case_insensitive(&transcript[cursor..], needle)
+            .map(|offset| cursor + offset)
+            .or_else(|| find_ascii_case_insensitive(transcript, needle));
+
+        let Some(start) = start else {
+            continue;
+        };
+
+        let end = (start + needle.len()).min(transcript.len());
+        aligned.push(AlignedSttSegment {
+            start_s: segment.start_s,
+            end_s: segment.end_s.max(segment.start_s),
+            transcript_start: start,
+            transcript_end: end,
+        });
+        cursor = end;
+    }
+
+    aligned
+}
+
+#[cfg(feature = "cactus")]
+fn entity_redaction_label(kind: EntityType) -> &'static str {
+    match kind {
+        EntityType::Ssn => "ssn",
+        EntityType::Phone => "phone number",
+        EntityType::Email => "email address",
+        EntityType::Name => "name",
+        EntityType::Address => "address",
+        EntityType::InsuranceId => "insurance ID",
+        EntityType::Mrn => "medical record number",
+        EntityType::Dob => "date of birth",
+        EntityType::HealthContext => "health information",
+        EntityType::Other => "sensitive information",
+    }
+}
+
+#[cfg(feature = "cactus")]
+fn push_unique_label(labels: &mut Vec<&'static str>, label: &'static str) {
+    if !labels.contains(&label) {
+        labels.push(label);
+    }
+}
+
+#[cfg(feature = "cactus")]
+fn describe_redaction_labels(labels: &[&'static str]) -> String {
+    match labels {
+        [] => "redacted sensitive information".to_string(),
+        [one] => format!("redacted {one}"),
+        [first, second] => format!("redacted {first} and {second}"),
+        _ => {
+            let mut text = String::from("redacted ");
+            for (index, label) in labels.iter().enumerate() {
+                if index > 0 {
+                    if index == labels.len() - 1 {
+                        text.push_str(", and ");
+                    } else {
+                        text.push_str(", ");
+                    }
+                }
+                text.push_str(label);
+            }
+            text
+        }
+    }
+}
+
+#[cfg(feature = "cactus")]
+fn build_redaction_audio_spans(result: &AudioChunkResult) -> Result<Vec<RedactionAudioSpan>> {
+    if result.detection.entities.is_empty() {
+        return Ok(Vec::new());
+    }
+    if result.stt_segments.is_empty() {
+        return Err(anyhow!("STT backend did not provide timing segments"));
+    }
+
+    let aligned_segments = align_stt_segments(&result.raw_transcript, &result.stt_segments);
+    if aligned_segments.is_empty() {
+        return Err(anyhow!("unable to align STT segments to transcript"));
+    }
+
+    let mut entities = result.detection.entities.clone();
+    entities.sort_by_key(|entity| (entity.start, entity.end));
+
+    let mut spans = Vec::new();
+    for entity in entities {
+        let mut matching = aligned_segments
+            .iter()
+            .filter(|segment| {
+                segment.transcript_start < entity.end && segment.transcript_end > entity.start
+            })
+            .peekable();
+
+        let Some(first) = matching.peek().cloned() else {
+            return Err(anyhow!(
+                "unable to map detected {} span to audio timing",
+                entity.kind.as_str()
+            ));
+        };
+
+        let mut end_s = first.end_s;
+        for segment in matching {
+            end_s = end_s.max(segment.end_s);
+        }
+
+        spans.push(RedactionAudioSpan {
+            start_s: first.start_s,
+            end_s,
+            labels: vec![entity_redaction_label(entity.kind)],
+        });
+    }
+
+    spans.sort_by(|left, right| left.start_s.total_cmp(&right.start_s));
+
+    let mut merged: Vec<RedactionAudioSpan> = Vec::new();
+    for span in spans {
+        if let Some(last) = merged.last_mut() {
+            if span.start_s <= last.end_s + 0.05 {
+                last.end_s = last.end_s.max(span.end_s);
+                for label in span.labels {
+                    push_unique_label(&mut last.labels, label);
+                }
+                continue;
+            }
+        }
+        merged.push(span);
+    }
+
+    Ok(merged)
+}
+
+#[cfg(feature = "cactus")]
+fn extract_audio_slice(
+    input_path: &Path,
+    start_s: f64,
+    end_s: f64,
+    output_path: &Path,
+) -> Result<()> {
+    let duration_s = (end_s - start_s).max(0.0);
+    if duration_s <= 0.0 {
+        return Ok(());
+    }
+
+    let output = ProcessCommand::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args(["-ss", &format!("{start_s:.3}")])
+        .arg("-i")
+        .arg(input_path)
+        .args(["-t", &format!("{duration_s:.3}")])
+        .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+        .arg(output_path)
+        .output()
+        .map_err(|e| anyhow!("failed to start `ffmpeg` for audio slicing: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("`ffmpeg` audio slicing failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cactus")]
+fn play_audio_slice(path: &Path, start_s: f64, end_s: f64) -> Result<()> {
+    if end_s - start_s < 0.05 {
+        return Ok(());
+    }
+
+    let slice_path = default_live_artifact_path("wav");
+    extract_audio_slice(path, start_s, end_s, &slice_path)?;
+    let result = play_audio_file(&slice_path);
+    let _ = fs::remove_file(&slice_path);
+    result
+}
+
+#[cfg(feature = "cactus")]
+fn play_redacted_output_audio(
+    wav_path: &Path,
+    result: &AudioChunkResult,
+    duration_ms: u32,
+) -> Result<()> {
+    if result.detection.entities.is_empty() {
+        return play_audio_file(wav_path);
+    }
+
+    let spans = match build_redaction_audio_spans(result) {
+        Ok(spans) => spans,
+        Err(err) => {
+            eprintln!(
+                "masker: play-output fell back to full spoken redaction because span alignment failed: {err}"
+            );
+            return speak_text_locally(&speech_safe_output_text(result));
+        }
+    };
+
+    let total_s = f64::from(duration_ms) / 1000.0;
+    let mut cursor_s = 0.0;
+
+    for span in spans {
+        let start_s = span.start_s.clamp(0.0, total_s);
+        let end_s = span.end_s.clamp(start_s, total_s);
+
+        if start_s > cursor_s + 0.05 {
+            play_audio_slice(wav_path, cursor_s, start_s)?;
+        }
+
+        speak_text_locally(&describe_redaction_labels(&span.labels))?;
+        cursor_s = cursor_s.max(end_s);
+    }
+
+    if cursor_s < total_s - 0.05 {
+        play_audio_slice(wav_path, cursor_s, total_s)?;
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cactus")]
+fn play_audio_file(path: &Path) -> Result<()> {
+    let output = ProcessCommand::new("afplay")
+        .arg(path)
+        .output()
+        .map_err(|e| anyhow!("failed to start `afplay`: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("`afplay` failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cactus")]
+fn speak_text_locally(text: &str) -> Result<()> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let text_path = default_live_artifact_path("txt");
+    fs::write(&text_path, trimmed)
+        .map_err(|e| anyhow!("failed to write speech text {}: {e}", text_path.display()))?;
+
+    let output = ProcessCommand::new("say")
+        .args(["-f"])
+        .arg(&text_path)
+        .output()
+        .map_err(|e| anyhow!("failed to start `say`: {e}"))?;
+
+    let _ = fs::remove_file(&text_path);
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("`say` failed: {}", stderr.trim()));
+    }
+
+    Ok(())
+}
+
 fn build_backend(b: Backend) -> Result<Box<dyn GemmaBackend>> {
     Ok(match b {
         Backend::Stub => Box::new(StubBackend),
@@ -870,8 +1472,13 @@ fn run_command(command: Command) -> Result<i32> {
             interactive,
             input,
             stt_model_path,
+            stt,
             detection_model_path,
+            detect,
             keep_audio,
+            play_input,
+            play_output,
+            output,
         } => {
             #[cfg(not(feature = "cactus"))]
             {
@@ -883,8 +1490,13 @@ fn run_command(command: Command) -> Result<i32> {
                     interactive,
                     input,
                     stt_model_path,
+                    stt,
                     detection_model_path,
+                    detect,
                     keep_audio,
+                    play_input,
+                    play_output,
+                    output,
                 );
                 return Err(anyhow!(
                     "`masker live` requires the `cactus` feature; rebuild with `cargo run --features cactus -p masker-cli -- live ...`"
@@ -895,9 +1507,22 @@ fn run_command(command: Command) -> Result<i32> {
             {
                 if let Some(path) = stt_model_path {
                     std::env::set_var("CACTUS_STT_MODEL_PATH", path);
+                } else if let Some(preset) = stt {
+                    std::env::set_var("CACTUS_STT_MODEL_PATH", resolve_stt_preset_path(preset)?);
                 }
                 if let Some(path) = detection_model_path {
                     std::env::set_var("CACTUS_DETECTION_MODEL_PATH", path);
+                } else if let Some(preset) = detect {
+                    std::env::set_var(
+                        "CACTUS_DETECTION_MODEL_PATH",
+                        resolve_detection_preset_path(preset)?,
+                    );
+                } else if std::env::var("CACTUS_DETECTION_MODEL_PATH").is_err()
+                    && std::env::var("CACTUS_MODEL_PATH").is_err()
+                {
+                    if let Some(path) = resolve_default_detection_model_path() {
+                        std::env::set_var("CACTUS_DETECTION_MODEL_PATH", path);
+                    }
                 }
 
                 let recorded_here = audio_file.is_none();
@@ -926,7 +1551,7 @@ fn run_command(command: Command) -> Result<i32> {
                         eprintln!("============================================================");
                         eprintln!("     🌵 MASKER LIVE TRANSCRIPTION 🌵");
                         eprintln!("============================================================");
-                        eprintln!("Listening... Press Enter to stop");
+                        eprintln!("Listening... Press Enter to stop when you finish speaking");
                         eprintln!("------------------------------------------------------------");
                         record_audio_until_enter_with_ffmpeg(&pcm_path, &input)?;
                     } else {
@@ -998,7 +1623,11 @@ fn run_command(command: Command) -> Result<i32> {
                         "wav_path": wav_path.display().to_string(),
                         "retained": keep_audio,
                         "input": if recorded_here { Some(input) } else { None::<String> },
-                        "recorded_seconds": if recorded_here { Some(seconds) } else { None::<u64> },
+                        "recorded_seconds": if recorded_here && !interactive {
+                            Some(seconds)
+                        } else {
+                            None::<u64>
+                        },
                         "duration_ms": duration_ms,
                         "sample_count": signal.sample_count,
                         "peak_abs": signal.peak_abs,
@@ -1019,14 +1648,38 @@ fn run_command(command: Command) -> Result<i32> {
                     "transcript": result.raw_transcript,
                     "result": stream_result_json(&result),
                 });
-                if interactive {
+                if interactive && output != LiveOutputFormat::Human {
                     eprintln!();
                     eprintln!("------------------------------------------------------------");
                     eprintln!("Final transcript:");
                     eprintln!("{}", result.raw_transcript);
                     eprintln!("------------------------------------------------------------");
                 }
-                println!("{}", serde_json::to_string(&out)?);
+                match output {
+                    LiveOutputFormat::Human => print_live_human_summary(
+                        &session,
+                        &result,
+                        total_ms,
+                        signal,
+                        duration_ms,
+                        &detection_status,
+                        std::env::var("CACTUS_STT_MODEL_PATH").ok().as_deref(),
+                    ),
+                    LiveOutputFormat::Json => println!("{}", serde_json::to_string(&out)?),
+                    LiveOutputFormat::PrettyJson => {
+                        println!("{}", serde_json::to_string_pretty(&out)?)
+                    }
+                }
+
+                if play_input {
+                    eprintln!("masker: playing captured input audio");
+                    play_audio_file(&wav_path)?;
+                }
+
+                if play_output {
+                    eprintln!("masker: playing local output audio with in-place redactions");
+                    play_redacted_output_audio(&wav_path, &result, duration_ms)?;
+                }
 
                 if !keep_audio {
                     let _ = fs::remove_file(&pcm_path);
@@ -1046,6 +1699,204 @@ fn truncate(s: &str, n: usize) -> String {
         let mut out: String = s.chars().take(n).collect();
         out.push('…');
         out
+    }
+}
+
+#[cfg(all(test, feature = "cactus"))]
+mod cli_tests {
+    use super::*;
+    use masker::contracts::{
+        DetectionResult, Entity, EntityType, MaskedText, PolicyDecision, PolicyName, RiskLevel,
+        Route,
+    };
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn speech_safe_output_replaces_tokens_and_placeholders() {
+        let mut token_map = BTreeMap::new();
+        token_map.insert("tok_deadbeef".to_string(), "482-55-1234".to_string());
+
+        let result = AudioChunkResult {
+            seq: 0,
+            raw_transcript: "My SSN is 482-55-1234.".to_string(),
+            stt_segments: Vec::new(),
+            masked_transcript: "My SSN is tok_deadbeef and [MASKED:address].".to_string(),
+            detection: DetectionResult {
+                entities: Vec::new(),
+                risk_level: RiskLevel::High,
+            },
+            policy: PolicyDecision {
+                route: Route::LocalOnly,
+                policy: PolicyName::HipaaBase,
+                rationale: String::new(),
+            },
+            masked: MaskedText {
+                text: "My SSN is tok_deadbeef and [MASKED:address].".to_string(),
+                token_map,
+            },
+            route: Route::LocalOnly,
+            audio_out: Vec::new(),
+            processing_ms: 0,
+            trace: Vec::new(),
+        };
+
+        assert_eq!(
+            speech_safe_output_text(&result),
+            "My SSN is redacted sensitive information and redacted address."
+        );
+    }
+
+    #[test]
+    fn builds_redaction_audio_spans_from_timed_segments() {
+        let result = AudioChunkResult {
+            seq: 0,
+            raw_transcript: "My SSN is 482-55-1234 and email me.".to_string(),
+            stt_segments: vec![
+                SttSegment {
+                    start_s: 0.0,
+                    end_s: 0.2,
+                    text: "My".to_string(),
+                },
+                SttSegment {
+                    start_s: 0.2,
+                    end_s: 0.4,
+                    text: "SSN".to_string(),
+                },
+                SttSegment {
+                    start_s: 0.4,
+                    end_s: 0.55,
+                    text: "is".to_string(),
+                },
+                SttSegment {
+                    start_s: 0.55,
+                    end_s: 1.1,
+                    text: "482-55-1234".to_string(),
+                },
+                SttSegment {
+                    start_s: 1.1,
+                    end_s: 1.4,
+                    text: "and email me.".to_string(),
+                },
+            ],
+            masked_transcript: "My SSN is tok_deadbeef and email me.".to_string(),
+            detection: DetectionResult {
+                entities: vec![Entity {
+                    kind: EntityType::Ssn,
+                    value: "482-55-1234".to_string(),
+                    start: 10,
+                    end: 21,
+                    confidence: 0.9,
+                }],
+                risk_level: RiskLevel::High,
+            },
+            policy: PolicyDecision {
+                route: Route::LocalOnly,
+                policy: PolicyName::HipaaBase,
+                rationale: String::new(),
+            },
+            masked: MaskedText {
+                text: "My SSN is tok_deadbeef and email me.".to_string(),
+                token_map: BTreeMap::new(),
+            },
+            route: Route::LocalOnly,
+            audio_out: Vec::new(),
+            processing_ms: 0,
+            trace: Vec::new(),
+        };
+
+        let spans = build_redaction_audio_spans(&result).unwrap();
+        assert_eq!(
+            spans,
+            vec![RedactionAudioSpan {
+                start_s: 0.55,
+                end_s: 1.1,
+                labels: vec!["ssn"],
+            }]
+        );
+    }
+
+    #[test]
+    fn keeps_safe_audio_between_distinct_sensitive_spans() {
+        let result = AudioChunkResult {
+            seq: 0,
+            raw_transcript: "My SSN is 482-55-1234 and my address is 1 Main St.".to_string(),
+            stt_segments: vec![
+                SttSegment {
+                    start_s: 0.0,
+                    end_s: 0.2,
+                    text: "My".to_string(),
+                },
+                SttSegment {
+                    start_s: 0.2,
+                    end_s: 0.4,
+                    text: "SSN".to_string(),
+                },
+                SttSegment {
+                    start_s: 0.4,
+                    end_s: 0.55,
+                    text: "is".to_string(),
+                },
+                SttSegment {
+                    start_s: 0.55,
+                    end_s: 1.1,
+                    text: "482-55-1234".to_string(),
+                },
+                SttSegment {
+                    start_s: 1.1,
+                    end_s: 1.2,
+                    text: "and".to_string(),
+                },
+                SttSegment {
+                    start_s: 1.2,
+                    end_s: 1.4,
+                    text: "my address".to_string(),
+                },
+                SttSegment {
+                    start_s: 1.4,
+                    end_s: 1.8,
+                    text: "is 1 Main St.".to_string(),
+                },
+            ],
+            masked_transcript: "My SSN is tok_deadbeef and my address is [MASKED:address]."
+                .to_string(),
+            detection: DetectionResult {
+                entities: vec![
+                    Entity {
+                        kind: EntityType::Ssn,
+                        value: "482-55-1234".to_string(),
+                        start: 10,
+                        end: 21,
+                        confidence: 0.9,
+                    },
+                    Entity {
+                        kind: EntityType::Address,
+                        value: "1 Main St.".to_string(),
+                        start: 40,
+                        end: 50,
+                        confidence: 0.9,
+                    },
+                ],
+                risk_level: RiskLevel::High,
+            },
+            policy: PolicyDecision {
+                route: Route::LocalOnly,
+                policy: PolicyName::HipaaBase,
+                rationale: String::new(),
+            },
+            masked: MaskedText {
+                text: "My SSN is tok_deadbeef and my address is [MASKED:address].".to_string(),
+                token_map: BTreeMap::new(),
+            },
+            route: Route::LocalOnly,
+            audio_out: Vec::new(),
+            processing_ms: 0,
+            trace: Vec::new(),
+        };
+
+        let spans = build_redaction_audio_spans(&result).unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].labels, vec!["ssn"]);
+        assert_eq!(spans[1].labels, vec!["address"]);
     }
 }
 
