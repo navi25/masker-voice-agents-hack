@@ -16,6 +16,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m masker_demo", description="Masker local-first demo backend")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    subparsers.add_parser("ui", help="Launch the interactive terminal demo UI")
+
     serve = subparsers.add_parser("serve", help="Start the FastAPI service")
     serve.add_argument("--host", default=SETTINGS.host)
     serve.add_argument("--port", type=int, default=SETTINGS.port)
@@ -52,6 +54,11 @@ def _add_common_runtime_args(parser: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "ui":
+        from .demo_ui import run as run_ui
+        run_ui()
+        return 0
 
     if args.command == "serve":
         import uvicorn

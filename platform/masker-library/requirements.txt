@@ -5,3 +5,5 @@ sounddevice>=0.4,<1.0
 webrtcvad-wheels>=2.0.14,<3.0
 faster-whisper>=1.0,<2.0
 python-dotenv>=1.0,<2.0
+textual>=0.52,<1.0
+rich>=13.0,<14.0
