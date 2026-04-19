@@ -35,6 +35,12 @@ python -m masker_demo serve --reload
 
 ## CLI Demo
 
+Interactive terminal UI (includes a live mic mode via `L`):
+
+```bash
+python -m masker_demo ui
+```
+
 Live mic mode:
 
 ```bash

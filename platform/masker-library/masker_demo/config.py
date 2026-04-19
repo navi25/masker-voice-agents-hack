@@ -47,7 +47,7 @@ SCENARIOS: list[dict] = [
         "desc": "Patient SSN · DOB · health context",
         "text": (
             "Hi, I'm Ravi Kumar, date of birth March 3rd 1989. "
-            "My social security is 123-45-6789. "
+            "My social security is one two three four five six seven eight nine. "
             "I had a heart condition last year and I need a refill for my medication."
         ),
         "policy": "hipaa_safe_mode",

@@ -9,8 +9,8 @@ class RedactorTests(unittest.TestCase):
     def test_stable_placeholders_across_session(self) -> None:
         redactor = SessionRedactor()
 
-        first = redactor.redact("Hi, I'm Ravi Kumar and my SSN is 123-45-6789.")
-        second = redactor.redact("Ravi Kumar called back. The SSN is still 123-45-6789.")
+        first = redactor.redact("Hi, I'm Ravi Kumar and my SSN is one two three four five six seven eight nine.")
+        second = redactor.redact("Ravi Kumar called back. The SSN is still one two three four five six seven eight nine.")
 
         self.assertIn("PERSON_1", first.redacted_text)
         self.assertIn("SSN_1", first.redacted_text)
@@ -23,7 +23,7 @@ class RedactorTests(unittest.TestCase):
         redactor = SessionRedactor()
         text = (
             "Hi, I'm Ravi Kumar, date of birth March 3rd 1989. "
-            "My social security is 123-45-6789. "
+            "My social security is one two three four five six seven eight nine. "
             "I had a heart condition last year and I need a refill for my medication."
         )
 
@@ -36,7 +36,7 @@ class RedactorTests(unittest.TestCase):
         )
         self.assertIn("heart condition last year", result.redacted_text)
         self.assertNotIn("Ravi Kumar", result.redacted_text)
-        self.assertNotIn("123-45-6789", result.redacted_text)
+        self.assertNotIn("one two three", result.redacted_text)
 
     def test_phone_address_and_email_detection(self) -> None:
         redactor = SessionRedactor()

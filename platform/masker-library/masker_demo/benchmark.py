@@ -11,6 +11,9 @@ from .redactor import SessionRedactor
 from .stt import FasterWhisperTranscriber
 from .config import BENCHMARK_STT_MODELS
 
+# Back-compat: demo_cli imports DEFAULT_MODELS.
+DEFAULT_MODELS = BENCHMARK_STT_MODELS
+
 
 @dataclass(frozen=True)
 class FixtureSpec:

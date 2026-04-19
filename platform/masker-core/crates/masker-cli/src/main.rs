@@ -1864,6 +1864,11 @@ fn run_command(command: Command) -> Result<i32> {
 
                 let (pipeline, detection_status) = build_live_pipeline(stt_backend)?;
 
+                let bar = term_fg_bold("─".repeat(72), TermColor::Cyan);
+                eprintln!("{bar}");
+                eprintln!("{}", term_fg_bold("MASKER LIVE  Transcribing…", TermColor::Cyan));
+                eprintln!("{bar}");
+
                 let pcm_path = default_live_artifact_path("pcm");
                 if audio_file.is_none() && stream_output {
                     if matches!(stt_engine, LiveSttEngine::Gemma4) {
@@ -1877,7 +1882,7 @@ fn run_command(command: Command) -> Result<i32> {
                         ));
                     }
 
-                    let bytes = stream_live_mic_to_terminal(
+                    let (bytes, chunk_results) = stream_live_mic_to_terminal(
                         &pipeline,
                         &session,
                         api_key.as_deref(),
@@ -1914,15 +1919,24 @@ fn run_command(command: Command) -> Result<i32> {
                         );
                     }
 
-                    // We already printed the live transcript updates while recording.
-                    // Don't re-process the whole clip again (avoids duplicate audit chunk seqs).
-                    let _ = (t0, detection_status);
+                    // Print session summary from aggregated chunk results.
+                    let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    print_stream_session_summary(
+                        &session,
+                        &chunk_results,
+                        total_ms,
+                        &detection_status,
+                        &state_path,
+                    );
+                    let _ = detection_status;
                     return Ok(0);
                 } else if let Some(audio) = audio_file {
                     normalize_audio_to_pcm(&audio, &pcm_path)?;
                 } else if interactive {
+                    eprintln!("{}", term_dim("Listening… press Enter to stop."));
                     record_audio_until_enter_with_ffmpeg(&pcm_path, &input)?;
                 } else {
+                    eprintln!("{}", term_dim(format!("Listening… ({seconds}s)")));
                     record_audio_with_ffmpeg(&pcm_path, seconds, &input)?;
                 }
                 let pcm_bytes = fs::read(&pcm_path)?;
@@ -2175,14 +2189,35 @@ fn coreml_check_gemma_e2b(gemma_dir: &Path) -> Result<()> {
         ("model", "model.mlpackage", "model.mlmodelc"),
     ];
 
-    let mut missing = Vec::new();
+    let mut missing: Vec<&'static str> = Vec::new();
     for (label, mlpackage, mlmodelc) in expected {
         let pkg = gemma_dir.join(mlpackage);
         let compiled = gemma_dir.join(mlmodelc);
-        if pkg.exists() || compiled.exists() {
+        if pkg.exists() {
+            println!(
+                "{} {} {}",
+                term_fg_bold("[OK]", TermColor::Green),
+                term_fg_bold(label, TermColor::Cyan),
+                term_dim(pkg.display().to_string())
+            );
             continue;
         }
-        missing.push(format!("{label} ({mlpackage} or {mlmodelc})"));
+        if compiled.exists() {
+            println!(
+                "{} {} {}",
+                term_fg_bold("[OK]", TermColor::Green),
+                term_fg_bold(label, TermColor::Cyan),
+                term_dim(compiled.display().to_string())
+            );
+            continue;
+        }
+        println!(
+            "{} {} {}",
+            term_fg_bold("[MISSING]", TermColor::Yellow),
+            term_fg_bold(label, TermColor::Cyan),
+            term_dim(format!("{mlpackage} or {mlmodelc}"))
+        );
+        missing.push(label);
     }
 
     if missing.is_empty() {
@@ -2190,10 +2225,24 @@ fn coreml_check_gemma_e2b(gemma_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
+    let hint = if missing.iter().any(|m| *m == "model") {
+        "\nHint: Gemma text prefill needs `model.mlpackage` (or `model.mlmodelc`). \
+If you only have `audio_encoder.mlpackage` and `vision_encoder.mlpackage`, you're missing the main LLM Core ML bundle.\n\
+Try:\n  cactus download google/gemma-4-E2B-it --reconvert\n\
+Or copy a pre-converted `model.mlpackage` into this directory."
+    } else {
+        ""
+    };
+
     Err(anyhow!(
-        "missing Core ML artifacts under {}: {}",
+        "missing Core ML artifacts under {}: {}.{}",
         gemma_dir.display(),
-        missing.join(", ")
+        missing
+            .into_iter()
+            .map(|m| format!("{m} (mlpackage/mlmodelc)"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        hint
     ))
 }
 
@@ -2205,7 +2254,7 @@ fn stream_live_mic_to_terminal(
     interactive: bool,
     seconds: u64,
     input: &str,
-) -> Result<Vec<u8>> {
+) -> Result<(Vec<u8>, Vec<AudioChunkResult>)> {
     use std::io::Write as _;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
@@ -2254,8 +2303,9 @@ fn stream_live_mic_to_terminal(
     let mut pending: Vec<u8> = Vec::new();
     let mut seq = 0u64;
     let mut sent_quit = false;
+    let mut chunk_results: Vec<AudioChunkResult> = Vec::new();
 
-    // 1 second chunks: low-latency, but long enough for most STT models to emit text.
+    // 1 second chunks at 16 kHz / 16-bit mono = 32 000 bytes.
     const CHUNK_BYTES: usize = 32_000;
     const MIN_FLUSH_BYTES: usize = 8_000;
 
@@ -2288,7 +2338,12 @@ fn stream_live_mic_to_terminal(
             };
 
             match pipeline.process(session, api_key, &chunk) {
-                Ok(result) => print_live_chunk_update(&result),
+                Ok(result) => {
+                    print_live_chunk_update(&result);
+                    if !result.raw_transcript.is_empty() {
+                        chunk_results.push(result);
+                    }
+                }
                 Err(e) => eprintln!(
                     "{}",
                     term_fg(format!("chunk {seq} error: {e:#}"), TermColor::Yellow)
@@ -2309,7 +2364,12 @@ fn stream_live_mic_to_terminal(
             duration_ms,
         };
         match pipeline.process(session, api_key, &chunk) {
-            Ok(result) => print_live_chunk_update(&result),
+            Ok(result) => {
+                print_live_chunk_update(&result);
+                if !result.raw_transcript.is_empty() {
+                    chunk_results.push(result);
+                }
+            }
             Err(e) => eprintln!(
                 "{}",
                 term_fg(format!("chunk {seq} error: {e:#}"), TermColor::Yellow)
@@ -2330,7 +2390,100 @@ fn stream_live_mic_to_terminal(
         ));
     }
 
-    Ok(full_pcm)
+    Ok((full_pcm, chunk_results))
+}
+
+#[cfg(feature = "cactus")]
+fn print_stream_session_summary(
+    session: &str,
+    results: &[AudioChunkResult],
+    total_ms: f64,
+    detection_status: &LiveDetectionStatus,
+    state_path: &std::path::Path,
+) {
+    let full_transcript = results
+        .iter()
+        .map(|r| r.raw_transcript.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let full_masked = results
+        .iter()
+        .map(|r| r.masked_transcript.trim())
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let all_entities: Vec<_> = {
+        let mut seen = std::collections::HashSet::new();
+        results
+            .iter()
+            .flat_map(|r| r.detection.entities.iter())
+            .filter(|e| seen.insert(e.kind.as_str()))
+            .map(|e| e.kind.as_str())
+            .collect()
+    };
+
+    let highest_risk = results.iter().map(|r| &r.detection.risk_level).max_by_key(|r| match r {
+        masker::contracts::RiskLevel::None => 0,
+        masker::contracts::RiskLevel::Low => 1,
+        masker::contracts::RiskLevel::Medium => 2,
+        masker::contracts::RiskLevel::High => 3,
+    });
+
+    let worst_route = results.iter().map(|r| r.route).max_by_key(|r| match r {
+        Route::SafeToSend => 0,
+        Route::MaskedSend => 1,
+        Route::LocalOnly => 2,
+    });
+
+    let bar = term_fg_bold("─".repeat(72), TermColor::Cyan);
+    println!();
+    println!("{bar}");
+    println!("{}", term_fg_bold("MASKER LIVE SUMMARY", TermColor::Cyan));
+    println!("{bar}");
+    println!("{} {}", term_dim("Session   :"), term_fg_bold(session, TermColor::Cyan));
+
+    let route_str = worst_route.map(|r| r.as_str()).unwrap_or("safe-to-send");
+    let route_colored = match worst_route {
+        Some(Route::LocalOnly) => term_fg_bold(route_str, TermColor::Magenta),
+        Some(Route::MaskedSend) => term_fg_bold(route_str, TermColor::Yellow),
+        _ => term_fg_bold(route_str, TermColor::Green),
+    };
+    println!("{} {route_colored}", term_dim("Route     :"));
+
+    let risk_str = highest_risk.map(|r| r.as_str()).unwrap_or("none");
+    let risk_colored = match highest_risk {
+        Some(masker::contracts::RiskLevel::High) => term_fg_bold(risk_str, TermColor::Red),
+        Some(masker::contracts::RiskLevel::Medium) => term_fg_bold(risk_str, TermColor::Yellow),
+        Some(masker::contracts::RiskLevel::Low) => term_fg_bold(risk_str, TermColor::Green),
+        _ => term_fg_bold(risk_str, TermColor::Gray),
+    };
+    println!("{} {risk_colored}", term_dim("Risk      :"));
+
+    let entities_str = if all_entities.is_empty() {
+        term_dim("none")
+    } else {
+        term_fg(all_entities.join(", "), TermColor::Red)
+    };
+    println!("{} {entities_str}", term_dim("Entities  :"));
+    println!("{} {}", term_dim("Chunks    :"), term_dim(format!("{} spoken", results.len())));
+    println!("{} {}", term_dim("Latency   :"), term_fg_bold(format!("{:.0} ms total", total_ms), TermColor::Green));
+    println!("{} {}{}", term_dim("Detection :"), term_dim(detection_status.engine), if detection_status.active { "" } else { " (regex only)" });
+    println!("{} {}", term_dim("Audit     :"), term_dim(state_path.display().to_string()));
+
+    if !full_transcript.is_empty() {
+        println!();
+        println!("{}", term_fg_bold("Full Transcript", TermColor::Cyan));
+        println!("{}", prettify_raw_transcript(&full_transcript, &[]));
+    }
+    if !full_masked.is_empty() && full_masked != full_transcript {
+        println!();
+        println!("{}", term_fg_bold("Sanitized", TermColor::Cyan));
+        println!("{}", prettify_masked_transcript(&full_masked));
+    }
+    println!();
 }
 
 #[cfg(feature = "cactus")]

@@ -202,7 +202,10 @@ impl SttBackend for CactusSttBackend {
 
         let transcript = envelope.response.trim().to_string();
         if transcript.is_empty() {
-            anyhow::bail!("cactus transcribe returned an empty transcript");
+            return Ok(SttTranscript {
+                text: String::new(),
+                segments: Vec::new(),
+            });
         }
         Ok(SttTranscript {
             text: transcript,

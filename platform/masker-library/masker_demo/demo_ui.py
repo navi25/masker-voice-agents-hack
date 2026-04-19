@@ -1,10 +1,13 @@
 """Masker CLI Demo UI — pretty terminal interface for masker-cli demonstrations."""
 from __future__ import annotations
 
+import queue
 import random
 import re
 import threading
 import time
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -18,8 +21,10 @@ from textual.widgets import Button, DataTable, Footer, RichLog, Static
 from rich.text import Text
 
 from .redactor import SessionRedactor
-from .models import DetectedEntity
+from .models import DetectedEntity, SessionConfig
 from .config import SCENARIOS, ENTITY_COLORS
+from .session import DemoSessionManager, default_session_id
+from .settings import SETTINGS
 
 
 # ── Data classes ─────────────────────────────────────────────────────────────
@@ -231,7 +236,7 @@ Screen {
     align: center middle;
     text-align: center;
 }
-.metric-card:last-child {
+.metric-card:last-of-type {
     margin-right: 0;
 }
 .metric-val {
@@ -298,6 +303,7 @@ class MaskerDemoApp(App[None]):
         Binding("h", "scenario('healthcare')", "Healthcare"),
         Binding("f", "scenario('finance')", "Finance"),
         Binding("p", "scenario('personal')", "Personal"),
+        Binding("l", "live", "Live Mic"),
         Binding("s", "stop", "Stop"),
         Binding("q", "quit", "Quit"),
     ]
@@ -312,6 +318,27 @@ class MaskerDemoApp(App[None]):
         self._session_counter = 0
         self._stop_event = threading.Event()
         self._active_scenario_id: str | None = None
+        self._last_raw: str = ""
+        self._last_redacted: str = ""
+        self._audio_proc: subprocess.Popen[str] | None = None
+        self._audio_lock = threading.Lock()
+        self._live_manager: DemoSessionManager | None = None
+        self._live_subscription = None
+        self._live_transcriber = None
+        self._live_raw_lines: list[str] = []
+        self._live_redacted_lines: list[str] = []
+        self._live_partial_raw: str = ""
+        self._live_partial_redacted: str = ""
+
+    def _ensure_live_transcriber(self):
+        if self._live_transcriber is not None:
+            return self._live_transcriber
+        from .stt import FasterWhisperTranscriber
+
+        transcriber = FasterWhisperTranscriber(model_name_or_path=SETTINGS.stt_model)
+        transcriber._ensure_model()
+        self._live_transcriber = transcriber
+        return transcriber
 
     # ── Layout ───────────────────────────────────────────────────────────────
 
@@ -333,6 +360,7 @@ class MaskerDemoApp(App[None]):
                     id=f"btn-{scn['id']}",
                     classes="scn-btn",
                 )
+            yield Button("🎙 Live [L]", id="btn-live", classes="scn-btn")
             yield Button("■ Stop [S]", id="stop-btn")
 
         with VerticalScroll(id="body"):
@@ -392,6 +420,13 @@ class MaskerDemoApp(App[None]):
             "Entities", "Types", "Route", "Compliant", "Time",
         )
 
+    def on_unmount(self) -> None:
+        self._stop_event.set()
+        self._stop_live_session()
+        with self._audio_lock:
+            if self._audio_proc and self._audio_proc.poll() is None:
+                self._audio_proc.terminate()
+
     # ── Button handlers ──────────────────────────────────────────────────────
 
     @on(Button.Pressed, "#btn-healthcare")
@@ -406,29 +441,75 @@ class MaskerDemoApp(App[None]):
     def _on_personal(self) -> None:
         self.action_scenario("personal")
 
+    @on(Button.Pressed, "#btn-live")
+    def _on_live(self) -> None:
+        self.action_live()
+
     @on(Button.Pressed, "#stop-btn")
     def _on_stop_btn(self) -> None:
         self.action_stop()
 
     @on(Button.Pressed, "#play-raw-btn")
     def _on_play_raw(self) -> None:
-        self._simulate_play("play-raw-btn", "▶  Play Original")
+        self._play_text("play-raw-btn", "▶  Play Original", self._last_raw)
 
     @on(Button.Pressed, "#play-redacted-btn")
     def _on_play_redacted(self) -> None:
-        self._simulate_play("play-redacted-btn", "▶  Play Redacted")
+        self._play_text("play-redacted-btn", "▶  Play Redacted", self._last_redacted)
 
-    def _simulate_play(self, btn_id: str, original_label: str) -> None:
-        btn = self.query_one(f"#{btn_id}", Button)
-        btn.label = "◼  Playing…"
-        btn.add_class("playing")
-        duration = random.uniform(1.8, 3.2)
-        self.set_timer(duration, lambda: self._reset_play_btn(btn_id, original_label))
-
-    def _reset_play_btn(self, btn_id: str, label: str) -> None:
+    def _set_play_btn(self, btn_id: str, label: str, playing: bool) -> None:
         btn = self.query_one(f"#{btn_id}", Button)
         btn.label = label
-        btn.remove_class("playing")
+        btn.disabled = playing
+        if playing:
+            btn.add_class("playing")
+        else:
+            btn.remove_class("playing")
+
+    def _reset_play_btn(self, btn_id: str, label: str) -> None:
+        self._set_play_btn(btn_id, label, playing=False)
+
+    def _play_text(self, btn_id: str, original_label: str, text: str) -> None:
+        text = (text or "").strip()
+        if not text:
+            self.query_one("#raw-log", RichLog).write(Text("\n[playback] nothing to play yet", style="#6e7681"))
+            return
+
+        self._set_play_btn(btn_id, "◼  Playing…", playing=True)
+        self._play_text_worker(btn_id, original_label, text)
+
+    @work(thread=True)
+    def _play_text_worker(self, btn_id: str, original_label: str, text: str) -> None:
+        try:
+            with self._audio_lock:
+                if self._audio_proc and self._audio_proc.poll() is None:
+                    self._audio_proc.terminate()
+                    try:
+                        self._audio_proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        self._audio_proc.kill()
+                        self._audio_proc.wait(timeout=1.0)
+                self._audio_proc = None
+
+                cmd: list[str] | None = None
+                if shutil.which("say"):
+                    cmd = ["say", text]
+                elif shutil.which("espeak"):
+                    cmd = ["espeak", text]
+
+                if not cmd:
+                    self.call_from_thread(
+                        self.query_one("#raw-log", RichLog).write,
+                        Text("\n[playback] no TTS command found (need `say` or `espeak`)", style="bold red"),
+                    )
+                    return
+
+                self._audio_proc = subprocess.Popen(cmd)
+
+            if self._audio_proc:
+                self._audio_proc.wait()
+        finally:
+            self.call_from_thread(self._reset_play_btn, btn_id, original_label)
 
     # ── Actions ──────────────────────────────────────────────────────────────
 
@@ -439,14 +520,26 @@ class MaskerDemoApp(App[None]):
         if scn:
             self._start_session(scn)
 
+    def action_live(self) -> None:
+        if self.session_running:
+            return
+        self._start_live_session()
+
     def action_stop(self) -> None:
         self._stop_event.set()
+        manager = self._live_manager
+        if manager is not None:
+            manager.stop()
+        with self._audio_lock:
+            if self._audio_proc and self._audio_proc.poll() is None:
+                self._audio_proc.terminate()
 
     # ── Session lifecycle ────────────────────────────────────────────────────
 
     def _start_session(self, scn: dict[str, str]) -> None:
         self._session_counter += 1
         session_id = f"ses_{scn['id'][:3]}_{self._session_counter:02d}"
+        self._stop_live_session()
         self._redactor.reset()
         self._stop_event.clear()
         self._active_scenario_id = scn["id"]
@@ -482,6 +575,83 @@ class MaskerDemoApp(App[None]):
         self.query_one("#token-line", Static).update("")
 
         self._run_session(scn)
+
+    def _start_live_session(self) -> None:
+        session_id = default_session_id()
+        self._stop_live_session()
+        self._redactor.reset()
+        self._stop_event.clear()
+        self._active_scenario_id = None
+
+        self._stats = SessionStats(
+            session_id=session_id,
+            scenario_name="Live Mic",
+            policy_mode=SETTINGS.policy_mode,
+        )
+
+        # UI reset
+        self.session_running = True
+        self.query_one("#session-label", Static).update(session_id)
+        self._set_status("recording")
+        self.query_one("#stop-btn").add_class("visible")
+
+        for s in SCENARIOS:
+            self.query_one(f"#btn-{s['id']}", Button).remove_class("active-scn")
+        self.query_one("#btn-live", Button).add_class("active-scn")
+
+        self.query_one("#left-panel").add_class("recording")
+        self.query_one("#right-panel").add_class("recording")
+        self.query_one("#raw-play-row").remove_class("visible")
+        self.query_one("#redacted-play-row").remove_class("visible")
+
+        self.query_one("#raw-log", RichLog).clear()
+        self.query_one("#redacted-log", RichLog).clear()
+        self.query_one("#raw-log", RichLog).write(
+            Text("Listening… speak into your microphone. Press Stop when done.", style="#8b949e")
+        )
+
+        for mid in ("total-ms", "stt-ms", "detect-ms", "mask-ms", "input-b", "output-b"):
+            self.query_one(f"#m-{mid}", Static).update("—")
+        self.query_one("#entities-line", Static).update("")
+        self.query_one("#token-line", Static).update("")
+
+        self._live_raw_lines = []
+        self._live_redacted_lines = []
+        self._live_partial_raw = ""
+        self._live_partial_redacted = ""
+
+        self.query_one("#raw-log", RichLog).write(Text("Loading STT model…", style="#6e7681"))
+        try:
+            self._ensure_live_transcriber()
+        except Exception as exc:
+            self._set_status("error")
+            self.query_one("#raw-log", RichLog).write(Text(f"\nLive mode error: {exc}", style="bold red"))
+            self._finalize_session()
+            return
+
+        config = SessionConfig(
+            session_id=session_id,
+            audio_mode="mic",
+            stt_model=SETTINGS.stt_model,
+            language=SETTINGS.language,
+            no_model=True,
+            policy_mode=SETTINGS.policy_mode,
+            partial_interval_ms=SETTINGS.partial_interval_ms,
+            sample_rate=SETTINGS.sample_rate,
+            device=SETTINGS.default_device,
+        )
+        self._run_live_session(config)
+
+    def _stop_live_session(self) -> None:
+        manager = self._live_manager
+        subscription = self._live_subscription
+        if manager is not None:
+            manager.stop()
+            manager.wait(timeout=1.0)
+        if manager is not None and subscription is not None:
+            manager.event_bus.unsubscribe(subscription)
+        self._live_manager = None
+        self._live_subscription = None
 
     @work(thread=True)
     def _run_session(self, scn: dict[str, str]) -> None:
@@ -534,6 +704,102 @@ class MaskerDemoApp(App[None]):
 
         self.call_from_thread(self._finalize_session)
 
+    @work(thread=True)
+    def _run_live_session(self, config: SessionConfig) -> None:
+        transcriber = self._live_transcriber
+        transcriber_factory = (lambda _model_name: transcriber) if transcriber is not None else None
+        manager = DemoSessionManager(safe_log_dir=SETTINGS.log_dir, transcriber_factory=transcriber_factory)
+        subscription = manager.subscribe()
+        self._live_manager = manager
+        self._live_subscription = subscription
+
+        manager.start(config)
+
+        for event in subscription.replay:
+            self.call_from_thread(self._on_live_event, event)
+
+        try:
+            while manager.is_running or not subscription.queue.empty():
+                try:
+                    event = subscription.queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                self.call_from_thread(self._on_live_event, event)
+                if event.get("type") == "session.stopped":
+                    break
+        finally:
+            manager.stop()
+            manager.wait(timeout=1.0)
+            manager.event_bus.unsubscribe(subscription)
+            self._live_manager = None
+            self._live_subscription = None
+
+    def _on_live_event(self, event: dict[str, Any]) -> None:
+        event_type = event.get("type")
+        if event_type == "session.started":
+            self.query_one("#stt-badge", Static).update(Text(f"● {SETTINGS.stt_model}", style="bold green"))
+            self.query_one("#redact-badge", Static).update(Text("● masker", style="#6e7681"))
+            return
+
+        if event_type in {"transcript.partial", "transcript.final"}:
+            raw_text = (event.get("raw_text") or "").strip()
+            redacted_text = (event.get("redacted_text") or "").strip()
+            entities = event.get("entities") or []
+            token_map = {item["token"]: item["raw_value"] for item in entities if "token" in item and "raw_value" in item}
+
+            if event_type == "transcript.partial":
+                self._live_partial_raw = raw_text
+                self._live_partial_redacted = redacted_text
+            else:
+                if raw_text:
+                    self._live_raw_lines.append(raw_text)
+                if redacted_text:
+                    self._live_redacted_lines.append(redacted_text)
+                self._live_partial_raw = ""
+                self._live_partial_redacted = ""
+
+            raw_full_parts = list(self._live_raw_lines)
+            if self._live_partial_raw:
+                raw_full_parts.append(self._live_partial_raw)
+            redacted_full_parts = list(self._live_redacted_lines)
+            if self._live_partial_redacted:
+                redacted_full_parts.append(self._live_partial_redacted)
+
+            raw_full = "\n".join(raw_full_parts)
+            redacted_full = "\n".join(redacted_full_parts)
+
+            stats = self._stats
+            if stats:
+                if event_type == "transcript.final":
+                    stats.total_entities += len(entities)
+                    stats.detected_types.update(
+                        {item.get("entity_type", "") for item in entities if item.get("entity_type")}
+                    )
+                    stats.token_map.update(token_map)
+                stats.input_bytes = len(raw_full.encode())
+                stats.output_bytes = len(redacted_full.encode())
+
+            self._apply_chunk_update(
+                raw_full,
+                redacted_full,
+                token_map,
+                stt_ms=-1.0,
+                redact_ms=-1.0,
+                stats=stats,
+            )
+            return
+
+        if event_type == "error":
+            self._set_status("error")
+            self.query_one("#raw-log", RichLog).write(Text(f"\nError: {event.get('message', '')}", style="bold red"))
+            return
+
+        if event_type == "session.stopped":
+            self.session_running = False
+            self.query_one("#btn-live", Button).remove_class("active-scn")
+            self._finalize_session()
+            return
+
     # ── UI update helpers (called on main thread) ────────────────────────────
 
     def _apply_chunk_update(
@@ -545,6 +811,8 @@ class MaskerDemoApp(App[None]):
         redact_ms: float,
         stats: SessionStats | None,
     ) -> None:
+        self._last_raw = raw
+        self._last_redacted = redacted
         raw_log = self.query_one("#raw-log", RichLog)
         raw_log.clear()
         raw_log.write(Text(raw, style="#e6edf3"))
@@ -600,6 +868,7 @@ class MaskerDemoApp(App[None]):
 
         if self._active_scenario_id:
             self.query_one(f"#btn-{self._active_scenario_id}", Button).remove_class("active-scn")
+        self.query_one("#btn-live", Button).remove_class("active-scn")
 
         stats = self._stats
         if not stats:
@@ -637,6 +906,13 @@ class MaskerDemoApp(App[None]):
             label.update(Text("● READY", style="#8b949e"))
 
     def _update_badge(self, selector: str, ms: float, label: str) -> None:
+        if ms < 0:
+            t = Text()
+            t.append("● ", style="bold green")
+            t.append(f"{label}: ", style="#6e7681")
+            t.append("live", style="bold green")
+            self.query_one(selector, Static).update(t)
+            return
         if ms < 100:
             dot, color = "●", "green"
         elif ms < 300:

@@ -1,3 +1,0 @@
-[workspace]
-members = ["masker-core"]
-resolver = "2"
