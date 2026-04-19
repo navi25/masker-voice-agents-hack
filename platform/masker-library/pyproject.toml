@@ -1,13 +1,36 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
 
 [project]
-name = "masker-demo"
+name = "masker-voice"
 version = "0.1.0"
-description = "Local-first live transcription and redaction demo backend for Masker"
-requires-python = ">=3.10"
+description = "On-device PII/PHI middleware for voice agents"
+license = { text = "MIT" }
+authors = [{ name = "Masker Hack Team" }]
+requires-python = ">=3.9"
 dependencies = []
 
-[tool.setuptools]
-packages = ["masker_demo"]
+[project.urls]
+Repository = "https://github.com/navi25/masker-voice-agents-hack"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+# ── maturin ───────────────────────────────────────────────────────────────────
+# Builds the `masker` Rust binary and bundles it inside the wheel as a console
+# script. After `pip install masker-voice`, the binary is on PATH so _cli.py
+# finds it automatically via shutil.which("masker").
+#
+# Build a local wheel:
+#   cd platform/masker-library && maturin build --release
+#
+# Build platform wheels for PyPI (run in CI via maturin-action):
+#   maturin publish
+[tool.maturin]
+# Binary crate that produces the `masker` executable
+manifest-path = "../masker-core/crates/masker-cli/Cargo.toml"
+# Python source package to include alongside the binary
+python-packages = ["masker"]
+# Installs the compiled binary as a console script (lands on PATH in the venv)
+binaries = ["masker"]
