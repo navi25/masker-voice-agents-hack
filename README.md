@@ -54,3 +54,9 @@ platform/
 
 This keeps the product surfaces grouped together instead of splitting the repo
 by language-specific top-level folders.
+
+## Pitch deck
+- Source: [`pitch-deck/index.html`](pitch-deck/index.html) — open in any browser, or serve via GitHub Pages.
+
+## Contributors
+See [CONTRIBUTORS.md](CONTRIBUTORS.md).

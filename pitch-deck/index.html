@@ -1,0 +1,813 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Masker — The on-device HIPAA layer for voice</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --bg-2: #ffffff;
+        --ink: #0f1733;
+        --ink-dim: #5b6b88;
+        --line: rgba(15, 23, 51, 0.08);
+        --line-2: rgba(15, 23, 51, 0.16);
+        --accent: #2563eb;
+        --accent-2: #0ea371;
+        --danger: #dc2640;
+        --warn: #c47200;
+        --mono: ui-monospace, "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+        --sans: "Inter", "Avenir Next", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      }
+
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      html, body {
+        height: 100%;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: var(--sans);
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        overflow: hidden;
+      }
+
+      /* ── Stage ─────────────────────────────────────────────── */
+      #stage {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(ellipse at 18% 18%, rgba(37, 99, 235, 0.10) 0%, transparent 55%),
+          radial-gradient(ellipse at 82% 82%, rgba(14, 163, 113, 0.10) 0%, transparent 60%),
+          var(--bg);
+      }
+      #stage::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(rgba(15, 23, 51, 0.05) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(15, 23, 51, 0.05) 1px, transparent 1px);
+        background-size: 80px 80px;
+        mask-image: radial-gradient(ellipse at center, rgba(0,0,0,0.7) 0%, transparent 75%);
+        opacity: 0.7;
+        pointer-events: none;
+      }
+
+      .slide {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 7vh 8vw;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 280ms ease;
+      }
+      .slide.active { opacity: 1; pointer-events: auto; }
+
+      /* ── Chrome ────────────────────────────────────────────── */
+      #brand {
+        position: absolute;
+        top: 32px; left: 40px;
+        display: flex; align-items: center; gap: 12px;
+        font-family: var(--mono);
+        font-size: 13px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+        z-index: 10;
+      }
+      #brand .dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        background: var(--accent-2);
+        box-shadow: 0 0 12px var(--accent-2);
+      }
+      #counter {
+        position: absolute;
+        bottom: 28px; right: 40px;
+        font-family: var(--mono);
+        font-size: 13px;
+        letter-spacing: 0.12em;
+        color: var(--ink-dim);
+        z-index: 10;
+      }
+      #progress {
+        position: absolute;
+        bottom: 0; left: 0;
+        height: 3px;
+        width: 0%;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        transition: width 280ms ease;
+        z-index: 10;
+      }
+      #hint {
+        position: absolute;
+        bottom: 28px; left: 40px;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--ink-dim);
+        opacity: 0.6;
+        z-index: 10;
+      }
+
+      /* ── Type ──────────────────────────────────────────────── */
+      .eyebrow {
+        font-family: var(--mono);
+        font-size: 14px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--accent-2);
+        margin-bottom: 28px;
+      }
+      .h1 {
+        font-size: clamp(48px, 6.4vw, 104px);
+        line-height: 0.98;
+        letter-spacing: -0.025em;
+        font-weight: 600;
+        max-width: 22ch;
+      }
+      .h2 {
+        font-size: clamp(36px, 4.2vw, 68px);
+        line-height: 1.05;
+        letter-spacing: -0.02em;
+        font-weight: 600;
+        max-width: 22ch;
+      }
+      .lede {
+        font-size: clamp(20px, 1.8vw, 30px);
+        line-height: 1.4;
+        color: var(--ink-dim);
+        max-width: 50ch;
+        margin-top: 28px;
+      }
+      .small {
+        font-size: 16px;
+        color: var(--ink-dim);
+        font-family: var(--mono);
+        letter-spacing: 0.08em;
+      }
+      .accent { color: var(--accent-2); }
+      .danger { color: var(--danger); }
+      .warn   { color: var(--warn); }
+      .ink    { color: var(--ink); }
+      .strike-through {
+        text-decoration: line-through;
+        text-decoration-color: var(--danger);
+        text-decoration-thickness: 3px;
+      }
+
+      /* ── Slide 1: Title ────────────────────────────────────── */
+      .s1 .wrap { text-align: left; max-width: 1200px; }
+      .s1 .h1 { font-weight: 600; }
+      .s1 .tagline {
+        margin-top: 40px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        font-size: clamp(22px, 2vw, 32px);
+        color: var(--ink-dim);
+        line-height: 1.3;
+      }
+      .s1 .tagline span {
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+      }
+      .s1 .tagline span::before {
+        content: "";
+        flex: 0 0 8px;
+        width: 8px; height: 8px;
+        border-radius: 50%;
+        background: var(--accent-2);
+        transform: translateY(-4px);
+      }
+      .s1 .footer {
+        margin-top: 56px;
+        display: flex; gap: 32px;
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--ink-dim);
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+      .s1 .footer span { display: flex; align-items: center; gap: 10px; }
+      .s1 .footer .pill {
+        padding: 6px 12px;
+        border: 1px solid var(--line-2);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.7);
+      }
+
+      /* ── Slide 2: Problem ──────────────────────────────────── */
+      .s2 .wrap { max-width: 1200px; }
+      .s2 .stat-row {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 24px;
+        margin-top: 56px;
+      }
+      .stat {
+        padding: 28px;
+        background: var(--bg-2);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        box-shadow: 0 4px 20px rgba(15, 23, 51, 0.04);
+      }
+      .stat .num {
+        font-size: clamp(40px, 4vw, 60px);
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: var(--ink);
+      }
+      .stat .num .unit {
+        font-size: 0.45em;
+        color: var(--ink-dim);
+        margin-left: 8px;
+        font-weight: 500;
+      }
+      .stat .label {
+        margin-top: 10px;
+        font-family: var(--mono);
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+      }
+
+      /* ── Slide 3: Two lines ────────────────────────────────── */
+      .s3 { text-align: center; }
+      .s3 .wrap { display: grid; place-items: center; gap: 48px; }
+      .s3 .label {
+        font-family: var(--mono);
+        font-size: 14px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+      }
+      .s3 .h-mega {
+        font-size: clamp(80px, 12vw, 200px);
+        font-weight: 700;
+        letter-spacing: -0.04em;
+        line-height: 0.9;
+        background: linear-gradient(180deg, #0f1733 0%, #5b6b88 100%);
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      .code-block {
+        font-family: var(--mono);
+        font-size: clamp(18px, 1.5vw, 26px);
+        line-height: 1.7;
+        text-align: left;
+        background: var(--bg-2);
+        border: 1px solid var(--line-2);
+        border-radius: 16px;
+        padding: 36px 48px;
+        max-width: 900px;
+        color: var(--ink);
+        box-shadow: 0 20px 60px rgba(15, 23, 51, 0.10);
+      }
+      .code-block .kw   { color: #8b3fbf; }
+      .code-block .fn   { color: #2563eb; }
+      .code-block .str  { color: #0ea371; }
+      .code-block .arg  { color: #c47200; }
+      .code-block .com  { color: var(--ink-dim); }
+
+      /* ── Slide 4: After Masker ─────────────────────────────── */
+      .s4 .wrap {
+        max-width: 1280px;
+        display: grid;
+        grid-template-columns: 1fr 1.1fr;
+        gap: 56px;
+        align-items: center;
+      }
+      .s4 .h2 { max-width: 18ch; }
+      .s4 .audit {
+        background: var(--bg-2);
+        border: 1px solid var(--line-2);
+        border-radius: 14px;
+        padding: 28px;
+        font-family: var(--mono);
+        font-size: 13px;
+        line-height: 1.7;
+        color: var(--ink);
+        box-shadow: 0 20px 60px rgba(15, 23, 51, 0.10);
+      }
+      .s4 .audit .row {
+        display: flex; gap: 14px;
+        padding: 8px 0;
+        border-bottom: 1px dashed var(--line);
+      }
+      .s4 .audit .row:last-child { border: 0; }
+      .s4 .audit .k {
+        color: var(--accent);
+        min-width: 110px;
+      }
+      .s4 .audit .v { color: var(--ink); }
+      .s4 .audit .badge {
+        display: inline-block;
+        font-size: 11px;
+        padding: 2px 8px;
+        border-radius: 4px;
+        background: rgba(220, 38, 64, 0.10);
+        color: var(--danger);
+        border: 1px solid rgba(220, 38, 64, 0.30);
+        letter-spacing: 0.08em;
+      }
+      .s4 .audit .badge.ok {
+        background: rgba(14, 163, 113, 0.10);
+        color: var(--accent-2);
+        border-color: rgba(14, 163, 113, 0.35);
+      }
+      .s4 .verbs {
+        margin-top: 28px;
+        display: flex; gap: 16px;
+        flex-wrap: wrap;
+        font-family: var(--mono);
+        font-size: 14px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--ink-dim);
+      }
+      .s4 .verbs span {
+        padding: 8px 14px;
+        border: 1px solid var(--line-2);
+        border-radius: 999px;
+      }
+      .s4 .verbs .hot {
+        color: var(--accent-2);
+        border-color: rgba(14, 163, 113, 0.5);
+        background: rgba(14, 163, 113, 0.08);
+      }
+
+      /* ── Slide 5: Compliance pack (product UI mock) ──────────── */
+      .s5pack .wrap {
+        max-width: 1340px;
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+        gap: 48px;
+        align-items: center;
+      }
+
+      /* Window chrome */
+      .pack-doc {
+        background: #ffffff;
+        border: 1px solid var(--line-2);
+        border-radius: 10px;
+        overflow: hidden;
+        position: relative;
+        box-shadow:
+          0 24px 60px rgba(15, 23, 51, 0.14),
+          0 4px 12px rgba(15, 23, 51, 0.06);
+      }
+      .pack-doc .titlebar {
+        display: flex; align-items: center; gap: 12px;
+        padding: 10px 14px;
+        background: #f1f3f9;
+        border-bottom: 1px solid var(--line);
+      }
+      .pack-doc .traffic { display: flex; gap: 6px; }
+      .pack-doc .traffic span {
+        width: 11px; height: 11px; border-radius: 50%;
+        background: #d8dbe4;
+      }
+      .pack-doc .traffic span:nth-child(1) { background: #ff5f57; }
+      .pack-doc .traffic span:nth-child(2) { background: #febc2e; }
+      .pack-doc .traffic span:nth-child(3) { background: #28c840; }
+      .pack-doc .titlebar .path {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--ink-dim);
+        letter-spacing: 0.04em;
+      }
+      .pack-doc .titlebar .path b { color: var(--ink); font-weight: 600; }
+      .pack-doc .titlebar .spacer { flex: 1; }
+      .pack-doc .titlebar .verify {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        font-weight: 600;
+        color: var(--accent-2);
+        background: rgba(14, 163, 113, 0.10);
+        border: 1px solid rgba(14, 163, 113, 0.28);
+        padding: 4px 9px;
+        border-radius: 999px;
+        letter-spacing: 0.04em;
+      }
+
+      /* Header */
+      .pack-doc .doc-head {
+        padding: 18px 22px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+      .pack-doc .doc-meta {
+        font-family: var(--mono); font-size: 10px;
+        color: var(--ink-dim);
+        letter-spacing: 0.10em; text-transform: uppercase;
+        margin-bottom: 6px;
+      }
+      .pack-doc h4 {
+        font-size: 19px;
+        line-height: 1.2;
+        font-weight: 600;
+        color: var(--ink);
+        letter-spacing: -0.01em;
+      }
+
+      /* Section bar */
+      .pack-doc .doc-section {
+        font-family: var(--mono);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.10em;
+        color: var(--accent);
+        background: #fafbff;
+        border-bottom: 1px solid var(--line);
+        padding: 8px 22px;
+        text-transform: uppercase;
+      }
+
+      /* Rows */
+      .pack-doc .doc-rows {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--ink);
+        line-height: 1.5;
+      }
+      .pack-doc .doc-row {
+        display: grid;
+        grid-template-columns: 32px 64px 1fr auto;
+        gap: 14px;
+        align-items: center;
+        padding: 7px 22px;
+        border-bottom: 1px solid rgba(15, 23, 51, 0.04);
+      }
+      .pack-doc .doc-row:hover { background: #fafbff; }
+      .pack-doc .doc-row .ln {
+        color: #c7cdd8;
+        text-align: right;
+        font-size: 10.5px;
+        user-select: none;
+      }
+      .pack-doc .doc-row .ts { color: var(--ink-dim); font-size: 10.5px; }
+
+      /* Pill badges */
+      .pack-doc .doc-row .pill {
+        font-family: var(--mono);
+        font-size: 9.5px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        padding: 3px 8px;
+        border-radius: 999px;
+        text-align: center;
+        white-space: nowrap;
+      }
+      .pack-doc .doc-row .pill.ok {
+        color: var(--accent-2);
+        background: rgba(14, 163, 113, 0.10);
+        border: 1px solid rgba(14, 163, 113, 0.28);
+      }
+      .pack-doc .doc-row .pill.local {
+        color: var(--accent);
+        background: rgba(37, 99, 235, 0.08);
+        border: 1px solid rgba(37, 99, 235, 0.28);
+      }
+      .pack-doc .doc-row .pill.flag {
+        color: var(--warn);
+        background: rgba(196, 114, 0, 0.10);
+        border: 1px solid rgba(196, 114, 0, 0.30);
+      }
+
+      /* Status footer */
+      .pack-doc .statusbar {
+        display: flex; align-items: center; gap: 14px;
+        padding: 10px 22px;
+        background: #f1f3f9;
+        border-top: 1px solid var(--line);
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--ink-dim);
+      }
+      .pack-doc .statusbar .glyph {
+        width: 22px; height: 22px; border-radius: 50%;
+        background: var(--accent-2); color: #fff;
+        display: grid; place-items: center;
+        font-weight: 700; font-size: 11px;
+      }
+      .pack-doc .statusbar .meta b { color: var(--ink); font-weight: 600; }
+      .pack-doc .statusbar .meta code {
+        font-family: var(--mono);
+        background: rgba(15, 23, 51, 0.05);
+        padding: 1px 5px;
+        border-radius: 3px;
+      }
+      .pack-doc .statusbar .spacer { flex: 1; }
+      .pack-doc .statusbar .turn {
+        font-weight: 600; color: var(--ink);
+      }
+
+      .pack-bullets { list-style: none; }
+      .pack-bullets li {
+        position: relative;
+        padding-left: 28px;
+        margin-bottom: 22px;
+        font-size: 19px;
+        line-height: 1.45;
+        color: var(--ink);
+        max-width: 540px;
+      }
+      .pack-bullets li::before {
+        content: '';
+        position: absolute; left: 0; top: 14px;
+        width: 16px; height: 2px;
+        background: var(--accent-2);
+      }
+      .pack-bullets li b { font-weight: 600; color: var(--accent); }
+
+      /* ── Slide 6: Why us, why now ──────────────────────────── */
+      .s5 .wrap { max-width: 1180px; }
+      .s5 .context-row {
+        margin-top: 40px;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 22px;
+      }
+      .context-card {
+        padding: 26px 30px;
+        background: linear-gradient(180deg, rgba(37, 99, 235, 0.06) 0%, rgba(37, 99, 235, 0.02) 100%);
+        border: 1px solid rgba(37, 99, 235, 0.18);
+        border-radius: 12px;
+        position: relative;
+      }
+      .context-card .ctx-label {
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--accent);
+        font-weight: 600;
+        margin-bottom: 10px;
+      }
+      .context-card .ctx-body {
+        font-size: 19px;
+        line-height: 1.5;
+        color: var(--ink);
+      }
+      .s5 .points {
+        margin-top: 22px;
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 22px;
+      }
+      .point {
+        padding: 22px 24px;
+        background: var(--bg-2);
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--accent-2);
+        border-radius: 10px;
+        font-size: 17px;
+        line-height: 1.45;
+        color: var(--ink);
+        box-shadow: 0 4px 16px rgba(15, 23, 51, 0.04);
+      }
+      .point b { color: var(--accent-2); font-weight: 600; }
+      .s5 .closer {
+        margin-top: 56px;
+        text-align: center;
+        font-family: var(--mono);
+        font-size: clamp(18px, 1.5vw, 24px);
+        letter-spacing: 0.06em;
+        color: var(--ink);
+        padding: 24px;
+        border-top: 1px solid var(--line);
+        border-bottom: 1px solid var(--line);
+      }
+      .s5 .closer .sep { color: var(--ink-dim); margin: 0 14px; }
+
+      /* ── Misc ─────────────────────────────────────────────── */
+      .kbd {
+        font-family: var(--mono);
+        font-size: 11px;
+        padding: 2px 6px;
+        border: 1px solid var(--line-2);
+        border-radius: 4px;
+        color: var(--ink-dim);
+        background: rgba(255, 255, 255, 0.7);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage">
+      <div id="brand"><span class="dot"></span><span>Masker</span></div>
+      <div id="counter">01 / 05</div>
+      <div id="hint"><span class="kbd">←</span> <span class="kbd">→</span> &nbsp;to navigate</div>
+      <div id="progress"></div>
+
+      <!-- ── Slide 1 — Title ─────────────────────────────── -->
+      <section class="slide s1 active" data-slide="1">
+        <div class="wrap">
+          <h1 class="h1">The on-device <span class="accent">HIPAA</span> layer for healthcare voice agents.</h1>
+          <div class="tagline">
+            <span>Two lines.</span>
+            <span>Eighteen identifiers — including the patient&apos;s voice print.</span>
+            <span>Zero PHI off-device.</span>
+            <span>OCR-ready evidence on every turn.</span>
+          </div>
+          <div class="footer">
+            <span class="pill">Masker</span>
+            <span>On-device · Cactus + Gemma 4</span>
+            <span>YC Demo · 2026</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Slide 2 — Problem ───────────────────────────── -->
+      <section class="slide s2" data-slide="2">
+        <div class="wrap">
+          <div class="eyebrow">The problem</div>
+          <h2 class="h2">Hybrid AI is not automatically <span class="danger">auditable</span>.</h2>
+          <p class="lede">
+            Cactus runs Gemma on-device — until the agent escalates to a cloud model for the hard turns.
+            That handoff is exactly when the patient&apos;s MRN, insurance ID, and voice print can cross
+            the boundary into prompts, logs, and a vendor&apos;s HIPAA risk chain.
+          </p>
+          <div class="stat-row">
+            <div class="stat">
+              <div class="num">18<span class="unit">identifiers</span></div>
+              <div class="label">HIPAA Safe Harbor §164.514(b)</div>
+            </div>
+            <div class="stat">
+              <div class="num">#16<span class="unit">voice print</span></div>
+              <div class="label">PHI in the audio itself</div>
+            </div>
+            <div class="stat">
+              <div class="num">0<span class="unit">today</span></div>
+              <div class="label">Redaction layers at the local→cloud gate</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Slide 3 — Two lines (the demo beat) ─────────── -->
+      <section class="slide s3" data-slide="3">
+        <div class="wrap">
+          <div class="label">The fix</div>
+          <div class="h-mega">Two lines.</div>
+          <div class="code-block">
+<span class="kw">from</span> masker <span class="kw">import</span> auto_attach<br/>
+auto_attach(<span class="arg">policy</span>=<span class="str">"hipaa"</span>, <span class="arg">audit_path</span>=<span class="str">"audit.jsonl"</span>)
+          </div>
+          <div class="small">Wrapper, not a rewrite. Drops in front of any Cactus + Gemma agent.</div>
+        </div>
+      </section>
+
+      <!-- ── Slide 4 — After Masker ──────────────────────── -->
+      <section class="slide s4" data-slide="4">
+        <div class="wrap">
+          <div>
+            <div class="eyebrow accent">What the judge sees</div>
+            <h2 class="h2">Detected. Routed. Masked. <span class="accent">Evidenced.</span></h2>
+            <p class="lede">
+              Same agent. Same patient. Same sentence. Now PHI is pre-emptively detected, masked,
+              and stopped — and a hash-chained audit row appears that becomes the immutable
+              evidence for your HIPAA compliance.
+            </p>
+            <div class="verbs">
+              <span>Detected</span>
+              <span>Routed</span>
+              <span>Masked</span>
+              <span>Answered</span>
+              <span class="hot">Evidenced</span>
+            </div>
+          </div>
+          <div class="audit">
+            <div class="row"><span class="k">decision</span><span class="v"><span class="badge">local-only</span></span></div>
+            <div class="row"><span class="k">controls</span><span class="v">164.312(a)(1) · 164.312(b) · 164.514(b)(2)(R)</span></div>
+            <div class="row"><span class="k">detected</span><span class="v">MRN 99812 <span class="warn">(high)</span> · BCBS-887421 <span class="warn">(med)</span></span></div>
+            <div class="row"><span class="k">reason</span><span class="v">MRN + insurance ID under hipaa_clinical</span></div>
+            <div class="row"><span class="k">prompt</span><span class="v"><span class="badge ok">never sent</span></span></div>
+            <div class="row"><span class="k">log</span><span class="v">[MRN_001] [INSURANCE_001]</span></div>
+            <div class="row"><span class="k">latency</span><span class="v">47 ms · on-device</span></div>
+            <div class="row"><span class="k">prev_hash</span><span class="v">a3f… → entry_hash b91…</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Slide 5 — The compliance pack ───────────────── -->
+      <section class="slide s5pack" data-slide="5">
+        <div class="wrap">
+          <div class="pack-doc">
+            <div class="titlebar">
+              <div class="traffic"><span></span><span></span><span></span></div>
+              <div class="path">masker · <b>audit.jsonl</b> · turn 1247</div>
+              <div class="spacer"></div>
+              <div class="verify">CHAIN VERIFIED ✓</div>
+            </div>
+
+            <div class="doc-head">
+              <div class="doc-meta">Acme Telehealth · session 8f2a · 2026-04-18 14:32 UTC</div>
+              <h4>HIPAA Audit Evidence — Voice Agent Turn Ledger</h4>
+            </div>
+
+            <div class="doc-section">§164.312(b) · Audit controls</div>
+            <div class="doc-rows">
+              <div class="doc-row"><span class="ln">01</span><span class="ts">14:32:01.142</span><span>Detected · <b>MRN</b> · 5 chars at [12:17]</span><span class="pill local">LOCAL</span></div>
+              <div class="doc-row"><span class="ln">02</span><span class="ts">14:32:01.143</span><span>Detected · <b>INSURANCE_ID</b> · 11 chars at [38:49]</span><span class="pill local">LOCAL</span></div>
+              <div class="doc-row"><span class="ln">03</span><span class="ts">14:32:01.144</span><span>Flagged · <b>BIOMETRIC</b> · has_voice_biometric=true</span><span class="pill flag">FLAG</span></div>
+              <div class="doc-row"><span class="ln">04</span><span class="ts">14:32:01.146</span><span>Policy · hipaa → route=local-only</span><span class="pill ok">CHAINED</span></div>
+              <div class="doc-row"><span class="ln">05</span><span class="ts">14:32:01.147</span><span>Egress · bytes_out=0 (cloud route blocked)</span><span class="pill ok">CHAINED</span></div>
+              <div class="doc-row"><span class="ln">06</span><span class="ts">14:32:02.193</span><span>Model · backend=local-cactus · 47 ms</span><span class="pill ok">CHAINED</span></div>
+            </div>
+
+            <div class="doc-section">§164.514(b)(2) · Safe Harbor coverage</div>
+            <div class="doc-rows">
+              <div class="doc-row"><span class="ln">07</span><span class="ts">—</span><span>17 / 17 Safe Harbor identifiers detected (A–R, skip Q)</span><span class="pill ok">PASS</span></div>
+              <div class="doc-row"><span class="ln">08</span><span class="ts">—</span><span>0 raw PHI strings present in audit.jsonl payload</span><span class="pill ok">PASS</span></div>
+              <div class="doc-row"><span class="ln">09</span><span class="ts">—</span><span><code>verify_chain(audit.jsonl)</code> → (True, 1247)</span><span class="pill ok">PASS</span></div>
+            </div>
+
+            <div class="statusbar">
+              <div class="glyph">M</div>
+              <div class="meta">
+                <b>SHA-256</b> · prev_hash <code>a3f…</code> → entry_hash <code>b91…</code> · append-only JSONL
+              </div>
+              <div class="spacer"></div>
+              <div class="turn">1,247 turns · 0 breaks</div>
+            </div>
+          </div>
+
+          <div>
+            <div class="eyebrow">What the privacy officer reads</div>
+            <h2 class="h2" style="font-size: clamp(32px, 3.2vw, 52px); margin-bottom: 32px;">
+              The same evidence row, <span class="accent">every turn</span>.
+            </h2>
+            <ul class="pack-bullets">
+              <li><b>Hash-chained audit log.</b> Every turn. Every redaction. SHA-256, prev_hash → entry_hash, append-only JSONL — verifiable offline with one call.</li>
+              <li><b>HIPAA control map, line by line.</b> §164.312(a)(1), §164.312(b), §164.514(b)(2)(A–R) tagged on every row — not a slide, your actual data flow.</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Slide 6 — Why us, why now ───────────────────── -->
+      <section class="slide s5" data-slide="6">
+        <div class="wrap">
+          <div class="eyebrow">Why us, why now</div>
+          <h2 class="h2">The on-device HIPAA layer for <span class="accent">voice</span>.</h2>
+          <div class="context-row">
+            <div class="context-card">
+              <div class="ctx-label">Team</div>
+              <div class="ctx-body">Been building agents in compliance-heavy spaces — fintech, payments — long enough to know the audit trail <em>is</em> the product.</div>
+            </div>
+            <div class="context-card">
+              <div class="ctx-label">Why now</div>
+              <div class="ctx-body">Voice agents are accelerating into regulated verticals faster than the compliance layer can keep up. We close the gap so they keep accelerating.</div>
+            </div>
+          </div>
+          <div class="points">
+            <div class="point"><b>On-device by construction.</b> Closes §164.312(a)(1), (b), and §164.514(b) by default. No BAA chain to negotiate.</div>
+            <div class="point"><b>Hash-chained evidence trail.</b> OCR-ready audit rows drop into your existing HIPAA log review, Vanta, Drata, Splunk.</div>
+            <div class="point"><b>Wrapper, not a rewrite.</b> <code>auto_attach(policy="hipaa")</code> in front of Vapi, Retell, Bland, Pipecat, LiveKit.</div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const slides = Array.from(document.querySelectorAll(".slide"));
+      const counter = document.getElementById("counter");
+      const progress = document.getElementById("progress");
+      let idx = 0;
+
+      const pad = (n) => String(n).padStart(2, "0");
+
+      function show(next) {
+        idx = Math.max(0, Math.min(slides.length - 1, next));
+        slides.forEach((s, i) => s.classList.toggle("active", i === idx));
+        counter.textContent = `${pad(idx + 1)} / ${pad(slides.length)}`;
+        progress.style.width = `${((idx + 1) / slides.length) * 100}%`;
+      }
+
+      document.addEventListener("keydown", (e) => {
+        if (["ArrowRight", "ArrowDown", " ", "PageDown"].includes(e.key)) { e.preventDefault(); show(idx + 1); }
+        else if (["ArrowLeft", "ArrowUp", "PageUp"].includes(e.key))      { e.preventDefault(); show(idx - 1); }
+        else if (e.key === "Home")                                          { show(0); }
+        else if (e.key === "End")                                           { show(slides.length - 1); }
+        else if (e.key === "f" || e.key === "F") {
+          if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+          else document.exitFullscreen();
+        }
+      });
+
+      document.addEventListener("click", (e) => {
+        if (e.target.closest("#hint, #brand, #counter")) return;
+        const half = window.innerWidth / 2;
+        show(e.clientX < half ? idx - 1 : idx + 1);
+      });
+
+      show(0);
+    </script>
+  </body>
+</html>
