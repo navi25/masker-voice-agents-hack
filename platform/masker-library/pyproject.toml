@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "masker-voice"
+version = "0.1.0"
+description = "On-device PII/PHI middleware for voice agents"
+license = { text = "MIT" }
+authors = [{ name = "Masker Hack Team" }]
+requires-python = ">=3.9"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/navi25/masker-voice-agents-hack"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["masker*"]
