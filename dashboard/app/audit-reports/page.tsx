@@ -1,16 +1,9 @@
 import { PageShell } from "@/components/layout/PageShell";
-import type { AuditReport } from "@/lib/mock-data";
+import { AUDIT_REPORTS } from "@/lib/mock-data";
 import { StatusChip } from "@/components/ui/StatusChip";
 import { Button } from "@/components/ui/Button";
 import { Download, Plus, FileText, Clock } from "lucide-react";
 
-const BASE = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
-
-async function getReports(): Promise<AuditReport[]> {
-  const res = await fetch(`${BASE}/api/audit-reports`, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to fetch audit reports");
-  return res.json();
-}
 
 const TEMPLATES = [
   { name: "HIPAA Readiness Report", desc: "PHI detection, masking coverage, and policy adherence", icon: "🏥" },
@@ -20,8 +13,8 @@ const TEMPLATES = [
   { name: "Custom Report Builder", desc: "Define your own scope, filters, and evidence set", icon: "⚙️" },
 ];
 
-export default async function AuditReportsPage() {
-  const reports = await getReports();
+export default function AuditReportsPage() {
+  const reports = AUDIT_REPORTS;
 
   return (
     <PageShell title="Audit Reports">

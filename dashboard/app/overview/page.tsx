@@ -5,29 +5,20 @@ import { Button } from "@/components/ui/Button";
 import { ArrowRight, Download, Plus, Upload } from "lucide-react";
 import Link from "next/link";
 import { OverviewCharts } from "./OverviewCharts";
-
-const BASE = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
-
-async function getOverview() {
-  const res = await fetch(`${BASE}/api/overview`, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to fetch overview");
-  return res.json();
-}
-
-async function getRecentReports() {
-  const res = await fetch(`${BASE}/api/audit-reports`, { cache: "no-store" });
-  if (!res.ok) return [];
-  const reports = await res.json();
-  return reports.slice(0, 3);
-}
+import {
+  OVERVIEW_METRICS,
+  SESSION_VOLUME,
+  TOP_ENTITY_TYPES,
+  RECENT_INCIDENTS,
+  AUDIT_REPORTS,
+} from "@/lib/mock-data";
 
 export default async function OverviewPage() {
-  const [overview, recentReports] = await Promise.all([
-    getOverview(),
-    getRecentReports(),
-  ]);
-
-  const { metrics: m, sessionVolume, topEntityTypes, recentIncidents } = overview;
+  const m = OVERVIEW_METRICS;
+  const sessionVolume = SESSION_VOLUME;
+  const topEntityTypes = TOP_ENTITY_TYPES;
+  const recentIncidents = RECENT_INCIDENTS;
+  const recentReports = AUDIT_REPORTS.slice(0, 3);
 
   return (
     <PageShell title="Overview">

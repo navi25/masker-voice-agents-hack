@@ -2,17 +2,8 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { PageShell } from "@/components/layout/PageShell";
 import { StatusChip } from "@/components/ui/StatusChip";
-import type { Session } from "@/lib/mock-data";
+import { SESSIONS } from "@/lib/mock-data";
 import { ArrowLeft } from "lucide-react";
-
-const BASE = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
-
-async function getSession(id: string): Promise<Session | null> {
-  const res = await fetch(`${BASE}/api/sessions/${id}`, { cache: "no-store" });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error("Failed to fetch session");
-  return res.json();
-}
 
 const ACTION_COLORS: Record<string, string> = {
   mask:     "bg-blue-50 text-blue-700",
@@ -22,12 +13,12 @@ const ACTION_COLORS: Record<string, string> = {
   block:    "bg-red-50 text-red-800",
 };
 
-export default async function SessionDetailPage({
+export default function SessionDetailPage({
   params,
 }: {
   params: { id: string };
 }) {
-  const session = await getSession(params.id);
+  const session = SESSIONS.find((s) => s.id === params.id) ?? null;
   if (!session) notFound();
 
   return (
