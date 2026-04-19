@@ -35,3 +35,4 @@ weights/
 node_modules/
 platform/masker-admin/dist/
 platform/masker-admin/.vite/
+platform/masker-core/models/

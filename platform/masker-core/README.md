@@ -95,6 +95,9 @@ cactus download google/gemma-4-E2B-it
 # Gemma 4 detection auto-loads from standard Cactus weights locations when present.
 export CACTUS_STT_MODEL_PATH="$(brew --prefix cactus)/libexec/weights/whisper-small"
 cargo run --release --features cactus -p masker-cli -- live --seconds 5
+
+# live terminal updates while speaking (press Enter to stop)
+cargo run --release --features cactus -p masker-cli -- live --interactive --stream-output
 ```
 
 ## Apple NPU setup for Cactus

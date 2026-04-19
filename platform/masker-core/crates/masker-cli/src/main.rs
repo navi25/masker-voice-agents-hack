@@ -13,6 +13,8 @@ use std::fs;
 #[cfg(feature = "cactus")]
 use std::io::Write;
 use std::io::{self, BufRead, IsTerminal};
+#[cfg(feature = "cactus")]
+use std::io::{BufReader, Read};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -341,6 +343,11 @@ enum Command {
         /// How to render the result.
         #[arg(long, value_enum, default_value_t = LiveOutputFormat::Human)]
         output: LiveOutputFormat,
+
+        /// Stream live transcription/masking updates while recording from mic.
+        /// (Not supported for `--audio-file`.)
+        #[arg(long, default_value_t = false)]
+        stream_output: bool,
     },
 
     /// Recover a vault token (tok_...) back to its original plaintext.
@@ -950,9 +957,21 @@ fn print_live_human_summary(
     detection_status: &LiveDetectionStatus,
     stt_model_path: Option<&str>,
 ) {
+    println!("{}", term_fg_bold("Raw Transcript", TermColor::Cyan));
+    println!(
+        "{}",
+        prettify_raw_transcript(&result.raw_transcript, &result.detection.entities)
+    );
+    if result.masked_transcript != result.raw_transcript {
+        println!();
+        println!("{}", term_fg_bold("Sanitized", TermColor::Cyan));
+        println!("{}", prettify_masked_transcript(&result.masked_transcript));
+    }
+
     let bar = term_dim("─".repeat(72));
+    println!();
     println!("{bar}");
-    println!("{}", term_fg_bold("MASKER LIVE", TermColor::Cyan));
+    println!("{}", term_fg_bold("MASKER LIVE SUMMARY", TermColor::Cyan));
     println!("{bar}");
     println!("{} {}", term_dim("Session   :"), term_fg_bold(session, TermColor::Cyan));
 
@@ -1018,17 +1037,6 @@ fn print_live_human_summary(
             term_dim("Init Error:"),
             term_fg(truncate(err, 120), TermColor::Yellow)
         );
-    }
-    println!();
-    println!("{}", term_fg_bold("Raw Transcript", TermColor::Cyan));
-    println!(
-        "{}",
-        prettify_raw_transcript(&result.raw_transcript, &result.detection.entities)
-    );
-    if result.masked_transcript != result.raw_transcript {
-        println!();
-        println!("{}", term_fg_bold("Sanitized", TermColor::Cyan));
-        println!("{}", prettify_masked_transcript(&result.masked_transcript));
     }
     if let Some(warning) = repeated_segment_warning(&result.raw_transcript) {
         println!();
@@ -1704,6 +1712,7 @@ fn run_command(command: Command) -> Result<i32> {
             play_input,
             play_output,
             output,
+            stream_output,
         } => {
             #[cfg(not(feature = "cactus"))]
             {
@@ -1724,6 +1733,7 @@ fn run_command(command: Command) -> Result<i32> {
                     play_input,
                     play_output,
                     output,
+                    stream_output,
                 );
                 return Err(anyhow!(
                     "binary built without `cactus` feature — rebuild with `cargo build --features cactus`"
@@ -1733,6 +1743,12 @@ fn run_command(command: Command) -> Result<i32> {
             #[cfg(feature = "cactus")]
             {
                 let t0 = Instant::now();
+
+                if stream_output && audio_file.is_some() {
+                    return Err(anyhow!(
+                        "`--stream-output` only works when recording from the mic (omit `--audio-file`)."
+                    ));
+                }
 
                 let stt_backend: Arc<dyn masker::SttBackend> = match stt_engine {
                     LiveSttEngine::Cactus => {
@@ -1763,7 +1779,60 @@ fn run_command(command: Command) -> Result<i32> {
                 let (pipeline, detection_status) = build_live_pipeline(stt_backend)?;
 
                 let pcm_path = default_live_artifact_path("pcm");
-                if let Some(audio) = audio_file {
+                if audio_file.is_none() && stream_output {
+                    if matches!(stt_engine, LiveSttEngine::Gemma4) {
+                        return Err(anyhow!(
+                            "`--stream-output` is not supported with `--stt-engine gemma4` yet (Gemma STT needs an on-disk WAV per chunk). Use `--audio-file` or `--stt-engine cactus`."
+                        ));
+                    }
+                    if play_output {
+                        return Err(anyhow!(
+                            "`--play-output` is not supported with `--stream-output` yet."
+                        ));
+                    }
+
+                    let bytes = stream_live_mic_to_terminal(
+                        &pipeline,
+                        &session,
+                        api_key.as_deref(),
+                        interactive,
+                        seconds,
+                        &input,
+                    )?;
+
+                    // Preserve the full recording as a single normalized WAV (useful for replays).
+                    fs::write(&pcm_path, &bytes)?;
+
+                    let wav_path = default_live_artifact_path("wav");
+                    pcm_to_wav(&pcm_path, &wav_path)?;
+
+                    if play_input {
+                        let _ = ProcessCommand::new("afplay").arg(&wav_path).status();
+                    }
+
+                    let state_path = default_state_path();
+                    save_state(&state_path, &pipeline.export_state())?;
+
+                    if !keep_audio {
+                        let _ = fs::remove_file(&pcm_path);
+                        let _ = fs::remove_file(&wav_path);
+                    } else {
+                        eprintln!(
+                            "{} {}",
+                            term_dim("Saved:"),
+                            term_dim(format!(
+                                "{} (pcm), {} (wav)",
+                                pcm_path.display(),
+                                wav_path.display()
+                            ))
+                        );
+                    }
+
+                    // We already printed the live transcript updates while recording.
+                    // Don't re-process the whole clip again (avoids duplicate audit chunk seqs).
+                    let _ = (t0, detection_status);
+                    return Ok(0);
+                } else if let Some(audio) = audio_file {
                     normalize_audio_to_pcm(&audio, &pcm_path)?;
                 } else if interactive {
                     record_audio_until_enter_with_ffmpeg(&pcm_path, &input)?;
@@ -1992,6 +2061,184 @@ fn coreml_check_gemma_e2b(gemma_dir: &Path) -> Result<()> {
         gemma_dir.display(),
         missing.join(", ")
     ))
+}
+
+#[cfg(feature = "cactus")]
+fn stream_live_mic_to_terminal(
+    pipeline: &StreamingPipeline,
+    session: &str,
+    api_key: Option<&str>,
+    interactive: bool,
+    seconds: u64,
+    input: &str,
+) -> Result<Vec<u8>> {
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let mut cmd = ProcessCommand::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error"]);
+    cmd.args(["-f", "avfoundation", "-i", input]);
+    cmd.args(["-ac", "1", "-ar", "16000", "-f", "s16le"]);
+
+    if !interactive {
+        cmd.args(["-t", &seconds.to_string()]);
+    }
+
+    cmd.arg("pipe:1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| anyhow!("failed to start ffmpeg: {e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("ffmpeg did not provide stdout"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("ffmpeg did not provide stderr"))?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    if interactive {
+        let stop = stop.clone();
+        thread::spawn(move || {
+            let mut line = String::new();
+            let _ = io::stdin().read_line(&mut line);
+            stop.store(true, Ordering::Relaxed);
+        });
+        eprintln!("{}", term_dim("Listening… press Enter to stop."));
+    } else {
+        eprintln!("{}", term_dim(format!("Listening… ({seconds}s)")));
+    }
+
+    let mut reader = BufReader::new(stdout);
+    let mut full_pcm: Vec<u8> = Vec::new();
+    let mut pending: Vec<u8> = Vec::new();
+    let mut seq = 0u64;
+    let mut sent_quit = false;
+
+    // 1 second chunks: low-latency, but long enough for most STT models to emit text.
+    const CHUNK_BYTES: usize = 32_000;
+    const MIN_FLUSH_BYTES: usize = 8_000;
+
+    let mut read_buf = [0u8; 8192];
+    loop {
+        if interactive && stop.load(Ordering::Relaxed) && !sent_quit {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(b"q\n");
+                let _ = stdin.flush();
+            }
+            sent_quit = true;
+        }
+
+        let n = reader.read(&mut read_buf)?;
+        if n == 0 {
+            break;
+        }
+
+        full_pcm.extend_from_slice(&read_buf[..n]);
+        pending.extend_from_slice(&read_buf[..n]);
+
+        while pending.len() >= CHUNK_BYTES {
+            let chunk_bytes = pending.drain(..CHUNK_BYTES).collect::<Vec<u8>>();
+            let chunk = AudioChunk {
+                seq,
+                data: chunk_bytes,
+                source_path: None,
+                sample_rate: 16_000,
+                duration_ms: pcm_duration_ms(CHUNK_BYTES),
+            };
+
+            match pipeline.process(session, api_key, &chunk) {
+                Ok(result) => print_live_chunk_update(&result),
+                Err(e) => eprintln!("{}", term_fg(format!("chunk {seq} error: {e:#}"), TermColor::Yellow)),
+            }
+            seq += 1;
+        }
+    }
+
+    // Flush remainder.
+    if pending.len() >= MIN_FLUSH_BYTES {
+        let duration_ms = pcm_duration_ms(pending.len());
+        let chunk = AudioChunk {
+            seq,
+            data: pending,
+            source_path: None,
+            sample_rate: 16_000,
+            duration_ms,
+        };
+        match pipeline.process(session, api_key, &chunk) {
+            Ok(result) => print_live_chunk_update(&result),
+            Err(e) => eprintln!("{}", term_fg(format!("chunk {seq} error: {e:#}"), TermColor::Yellow)),
+        }
+    }
+
+    // Surface ffmpeg errors.
+    let mut stderr_text = String::new();
+    let _ = stderr.read_to_string(&mut stderr_text);
+    let status = child
+        .wait()
+        .map_err(|e| anyhow!("failed waiting for ffmpeg: {e}"))?;
+    if !status.success() {
+        return Err(anyhow!(
+            "ffmpeg streaming failed. If the default mic is not device 0, run `ffmpeg -f avfoundation -list_devices true -i \"\"` to inspect inputs.\n{}",
+            stderr_text.trim()
+        ));
+    }
+
+    Ok(full_pcm)
+}
+
+#[cfg(feature = "cactus")]
+fn print_live_chunk_update(result: &AudioChunkResult) {
+    let seq = term_dim(format!("#{:<4}", result.seq));
+    let route = match result.route {
+        Route::LocalOnly => term_fg_bold(result.route.as_str(), TermColor::Magenta),
+        Route::MaskedSend => term_fg_bold(result.route.as_str(), TermColor::Yellow),
+        Route::SafeToSend => term_fg_bold(result.route.as_str(), TermColor::Green),
+    };
+    let risk = match result.detection.risk_level {
+        masker::contracts::RiskLevel::None => term_fg_bold("none", TermColor::Gray),
+        masker::contracts::RiskLevel::Low => term_fg_bold("low", TermColor::Green),
+        masker::contracts::RiskLevel::Medium => term_fg_bold("medium", TermColor::Yellow),
+        masker::contracts::RiskLevel::High => term_fg_bold("high", TermColor::Red),
+    };
+
+    let raw = result.raw_transcript.replace('\n', " ").trim().to_string();
+    let masked = result.masked_transcript.replace('\n', " ").trim().to_string();
+
+    if raw.is_empty() && masked.is_empty() {
+        return;
+    }
+
+    println!(
+        "{} {} {} {}",
+        seq,
+        term_dim("route="),
+        route,
+        term_dim(format!("risk={}", risk))
+    );
+    println!(
+        "  {} {}",
+        term_fg_bold("Raw      :", TermColor::Cyan),
+        prettify_raw_transcript(&raw, &result.detection.entities)
+    );
+    println!(
+        "  {} {}",
+        term_fg_bold("Sanitized :", TermColor::Cyan),
+        prettify_masked_transcript(&masked)
+    );
+    if !result.detection.entities.is_empty() {
+        println!(
+            "  {} {}",
+            term_dim("Entities :"),
+            term_fg(format_entity_list(result), TermColor::Red)
+        );
+    }
+    println!("{}", term_dim(format!("  ({:.0} ms)", result.processing_ms)));
+    println!();
 }
 
 fn main() -> ExitCode {
