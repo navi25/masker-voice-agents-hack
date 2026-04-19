@@ -1876,12 +1876,6 @@ fn run_command(command: Command) -> Result<i32> {
                             "`--stream-output` is not supported with `--stt-engine gemma4` yet (Gemma STT needs an on-disk WAV per chunk). Use `--audio-file` or `--stt-engine cactus`."
                         ));
                     }
-                    if play_output {
-                        return Err(anyhow!(
-                            "`--play-output` is not supported with `--stream-output` yet."
-                        ));
-                    }
-
                     let (bytes, chunk_results) = stream_live_mic_to_terminal(
                         &pipeline,
                         &session,
@@ -1897,12 +1891,34 @@ fn run_command(command: Command) -> Result<i32> {
                     let wav_path = default_live_artifact_path("wav");
                     pcm_to_wav(&pcm_path, &wav_path)?;
 
+                    let state_path = default_state_path();
+                    save_state(&state_path, &pipeline.export_state())?;
+
+                    // Print summary first so the user can read while audio plays.
+                    let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
+                    print_stream_session_summary(
+                        &session,
+                        &chunk_results,
+                        total_ms,
+                        &detection_status,
+                        &state_path,
+                    );
+
+                    // Play back audio BEFORE cleanup so the WAV file still exists.
                     if play_input {
                         let _ = ProcessCommand::new("afplay").arg(&wav_path).status();
                     }
-
-                    let state_path = default_state_path();
-                    save_state(&state_path, &pipeline.export_state())?;
+                    if play_output {
+                        let combined = chunk_results
+                            .iter()
+                            .map(|r| r.masked_transcript.trim())
+                            .filter(|t| !t.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !combined.is_empty() {
+                            let _ = speak_text_locally(&combined);
+                        }
+                    }
 
                     if !keep_audio {
                         let _ = fs::remove_file(&pcm_path);
@@ -1919,15 +1935,6 @@ fn run_command(command: Command) -> Result<i32> {
                         );
                     }
 
-                    // Print session summary from aggregated chunk results.
-                    let total_ms = t0.elapsed().as_secs_f64() * 1000.0;
-                    print_stream_session_summary(
-                        &session,
-                        &chunk_results,
-                        total_ms,
-                        &detection_status,
-                        &state_path,
-                    );
                     let _ = detection_status;
                     return Ok(0);
                 } else if let Some(audio) = audio_file {
@@ -1935,9 +1942,11 @@ fn run_command(command: Command) -> Result<i32> {
                 } else if interactive {
                     eprintln!("{}", term_dim("Listening… press Enter to stop."));
                     record_audio_until_enter_with_ffmpeg(&pcm_path, &input)?;
+                    eprintln!("{}", term_dim("Processing…"));
                 } else {
                     eprintln!("{}", term_dim(format!("Listening… ({seconds}s)")));
                     record_audio_with_ffmpeg(&pcm_path, seconds, &input)?;
+                    eprintln!("{}", term_dim("Processing…"));
                 }
                 let pcm_bytes = fs::read(&pcm_path)?;
 
@@ -2033,7 +2042,7 @@ fn run_command(command: Command) -> Result<i32> {
         } => run_command(Command::Live {
             session,
             api_key,
-            stream_output: audio_file.is_none(),
+            stream_output: false,
             audio_file,
             seconds,
             interactive,
@@ -2473,14 +2482,18 @@ fn print_stream_session_summary(
     println!("{} {}{}", term_dim("Detection :"), term_dim(detection_status.engine), if detection_status.active { "" } else { " (regex only)" });
     println!("{} {}", term_dim("Audit     :"), term_dim(state_path.display().to_string()));
 
-    if !full_transcript.is_empty() {
-        println!();
-        println!("{}", term_fg_bold("Full Transcript", TermColor::Cyan));
+    println!();
+    println!("{}", term_fg_bold("Full Transcript", TermColor::Cyan));
+    if full_transcript.is_empty() {
+        println!("{}", term_dim("(no speech detected)"));
+    } else {
         println!("{}", prettify_raw_transcript(&full_transcript, &[]));
     }
-    if !full_masked.is_empty() && full_masked != full_transcript {
-        println!();
-        println!("{}", term_fg_bold("Sanitized", TermColor::Cyan));
+    println!();
+    println!("{}", term_fg_bold("Sanitized", TermColor::Cyan));
+    if full_masked.is_empty() {
+        println!("{}", term_dim("(no speech detected)"));
+    } else {
         println!("{}", prettify_masked_transcript(&full_masked));
     }
     println!();
