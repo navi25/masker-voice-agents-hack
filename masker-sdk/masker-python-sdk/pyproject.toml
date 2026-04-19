@@ -23,13 +23,13 @@ dev = ["pytest>=7"]
 # finds it automatically via shutil.which("masker").
 #
 # Build a local wheel:
-#   cd platform/masker-library && maturin build --release
+#   cd masker-sdk/masker-python-sdk && maturin build --release
 #
 # Build platform wheels for PyPI (run in CI via maturin-action):
 #   maturin publish
 [tool.maturin]
 # Binary crate that produces the `masker` executable
-manifest-path = "../masker-core/crates/masker-cli/Cargo.toml"
+manifest-path = "../../platform/masker-core/crates/masker-cli/Cargo.toml"
 # Python source package to include alongside the binary
 python-packages = ["masker"]
 # Installs the compiled binary as a console script (lands on PATH in the venv)
