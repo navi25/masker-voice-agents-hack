@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@clerk/nextjs": "^7.2.3",
+    "@clerk/nextjs": "^5.7.2",
     "@google/generative-ai": "^0.24.1",
     "@vercel/postgres": "^0.10.0",
     "class-variance-authority": "^0.7.1",
