@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, MessageSquare, Activity, FileText,
   ClipboardList, KeyRound, Key, Settings, Shield, LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { createClient } from "@/lib/supabase/client";
+import { useClerk } from "@clerk/nextjs";
 
 const NAV = [
   { href: "/overview",      label: "Overview",           icon: LayoutDashboard },
@@ -28,14 +28,7 @@ interface SidebarProps {
 
 export function Sidebar({ orgName, orgSlug, userEmail }: SidebarProps) {
   const pathname = usePathname();
-  const router = useRouter();
-  const supabase = createClient();
-
-  async function signOut() {
-    await supabase.auth.signOut();
-    router.push("/login");
-    router.refresh();
-  }
+  const { signOut } = useClerk();
 
   return (
     <aside className="flex flex-col w-[220px] shrink-0 border-r border-[#e5e7eb] bg-[#fafafa] h-screen sticky top-0">
@@ -79,7 +72,7 @@ export function Sidebar({ orgName, orgSlug, userEmail }: SidebarProps) {
           <div className="text-[11px] text-[#9ca3af] truncate mb-3">{userEmail}</div>
         )}
         <button
-          onClick={signOut}
+          onClick={() => signOut({ redirectUrl: "/sign-in" })}
           className="flex items-center gap-1.5 text-[12px] text-[#9ca3af] hover:text-red-600 transition-colors"
         >
           <LogOut className="w-3.5 h-3.5" />

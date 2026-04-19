@@ -6,21 +6,21 @@ import { StatusChip } from "@/components/ui/StatusChip";
 import { cn } from "@/lib/utils";
 import { X, Mic, MessageSquare, SearchX } from "lucide-react";
 
-// Shape returned by /api/sessions (audit_logs table)
+// Shape returned by /api/sessions (audit_logs table — camelCase from Drizzle)
 interface SessionRow {
   id: string;
-  session_id: string;
+  sessionId: string;
   channel: string;
-  use_case: string;
-  policy_version: string;
+  useCase: string;
+  policyVersion: string;
   status: string;
-  risk_level: string;
-  entities_detected: number;
+  riskLevel: string;
+  entitiesDetected: number;
   duration: string;
-  raw_hash: string;
-  redacted_transcript: string;
-  entity_spans: unknown[];
-  created_at: string;
+  rawHash: string;
+  redactedTranscript: string;
+  entitySpans: unknown[];
+  createdAt: string;
 }
 
 function TableSkeleton() {
@@ -136,9 +136,9 @@ export function SessionsClient() {
                       selected?.id === s.id ? "bg-[#f9fafb]" : "hover:bg-[#fafafa]"
                     )}
                   >
-                    <td className="px-4 py-3 font-mono text-[#0d0f12]">{s.session_id}</td>
+                    <td className="px-4 py-3 font-mono text-[#0d0f12]">{s.sessionId}</td>
                     <td className="px-4 py-3 text-[#6b7280]">
-                      {new Date(s.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                      {new Date(s.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </td>
                     <td className="px-4 py-3">
                       <span className="flex items-center gap-1 text-[#6b7280]">
@@ -146,10 +146,10 @@ export function SessionsClient() {
                         {s.channel}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-[#374151]">{s.use_case}</td>
+                    <td className="px-4 py-3 text-[#374151]">{s.useCase}</td>
                     <td className="px-4 py-3"><StatusChip status={s.status as "clean" | "masked" | "blocked" | "flagged"} /></td>
-                    <td className="px-4 py-3 text-[#374151]">{s.entities_detected}</td>
-                    <td className="px-4 py-3"><StatusChip status={s.risk_level as "low" | "medium" | "high" | "critical"} /></td>
+                    <td className="px-4 py-3 text-[#374151]">{s.entitiesDetected}</td>
+                    <td className="px-4 py-3"><StatusChip status={s.riskLevel as "low" | "medium" | "high" | "critical"} /></td>
                     <td className="px-4 py-3 text-[#6b7280]">{s.duration}</td>
                   </tr>
                 ))
@@ -164,8 +164,8 @@ export function SessionsClient() {
         <div className="w-[380px] shrink-0 flex flex-col rounded-lg border border-[#e5e7eb] bg-white overflow-hidden">
           <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#e5e7eb]">
             <div>
-              <div className="font-mono text-[12px] text-[#9ca3af]">{selected.session_id}</div>
-              <div className="text-[13px] font-semibold text-[#0d0f12] mt-0.5">{selected.use_case}</div>
+              <div className="font-mono text-[12px] text-[#9ca3af]">{selected.sessionId}</div>
+              <div className="text-[13px] font-semibold text-[#0d0f12] mt-0.5">{selected.useCase}</div>
             </div>
             <button onClick={() => setSelected(null)} className="text-[#9ca3af] hover:text-[#0d0f12]">
               <X className="w-4 h-4" />
@@ -175,11 +175,11 @@ export function SessionsClient() {
             <div className="grid grid-cols-2 gap-3 text-[12px]">
               {[
                 ["Status", selected.status],
-                ["Risk", selected.risk_level],
+                ["Risk", selected.riskLevel],
                 ["Channel", selected.channel],
                 ["Duration", selected.duration],
-                ["Policy", selected.policy_version],
-                ["Entities", String(selected.entities_detected)],
+                ["Policy", selected.policyVersion],
+                ["Entities", String(selected.entitiesDetected)],
               ].map(([label, value]) => (
                 <div key={label}>
                   <div className="text-[11px] text-[#9ca3af] uppercase tracking-wide mb-0.5">{label}</div>
@@ -190,12 +190,12 @@ export function SessionsClient() {
             <div className="border-t border-[#f3f4f6] pt-4">
               <div className="text-[11px] text-[#9ca3af] uppercase tracking-wide mb-1.5">Redacted Transcript</div>
               <div className="text-[12px] text-[#374151] bg-[#f9fafb] rounded-md p-3 font-mono leading-relaxed border border-[#e5e7eb]">
-                {selected.redacted_transcript || <span className="italic text-[#9ca3af]">No transcript</span>}
+                {selected.redactedTranscript || <span className="italic text-[#9ca3af]">No transcript</span>}
               </div>
             </div>
             <div className="border-t border-[#f3f4f6] pt-4">
               <div className="text-[11px] text-[#9ca3af] uppercase tracking-wide mb-1.5">Raw Hash</div>
-              <div className="text-[11px] font-mono text-[#9ca3af] break-all">{selected.raw_hash}</div>
+              <div className="text-[11px] font-mono text-[#9ca3af] break-all">{selected.rawHash}</div>
             </div>
           </div>
         </div>

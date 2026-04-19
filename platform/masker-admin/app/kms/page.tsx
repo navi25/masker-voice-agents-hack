@@ -6,7 +6,7 @@ import { StatusChip } from "@/components/ui/StatusChip";
 
 import { RotateCcw, Ban, ArrowRight } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { KmsKey } from "@/lib/supabase/types";
+import type { KmsKey } from "@/lib/db/schema";
 
 function Skeleton() {
   return (
@@ -114,9 +114,9 @@ export default function KmsPage() {
                 <td className="px-5 py-3.5 font-mono text-[#0d0f12]">{k.alias}</td>
                 <td className="px-5 py-3.5 text-[#6b7280]">{k.scope}</td>
                 <td className="px-5 py-3.5 font-mono text-[#9ca3af]">{k.region}</td>
-                <td className="px-5 py-3.5 text-[#6b7280]">{k.rotation_cadence}</td>
-                <td className="px-5 py-3.5 text-[#6b7280]">{new Date(k.last_rotated_at).toLocaleDateString()}</td>
-                <td className="px-5 py-3.5"><StatusChip status={k.status} /></td>
+                <td className="px-5 py-3.5 text-[#6b7280]">{k.rotationCadence}</td>
+                <td className="px-5 py-3.5 text-[#6b7280]">{new Date(k.lastRotatedAt).toLocaleDateString()}</td>
+                <td className="px-5 py-3.5"><StatusChip status={k.status as never} /></td>
                 <td className="px-5 py-3.5">
                   <div className="flex items-center gap-1.5">
                     <button title="Rotate" disabled={k.status !== "active" || pending === k.id} onClick={() => rotate(k.id)}

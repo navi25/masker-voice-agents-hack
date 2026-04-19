@@ -1,8 +1,12 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { ClerkProvider } from "@clerk/nextjs";
 import { Sidebar } from "@/components/layout/Sidebar";
-import { createClient } from "@/lib/supabase/server";
+import { auth, currentUser } from "@clerk/nextjs/server";
+import { db } from "@/lib/db";
+import { orgs } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
 const jetbrainsMono = JetBrains_Mono({ subsets: ["latin"], variable: "--font-mono", display: "swap" });
@@ -15,47 +19,44 @@ export const metadata: Metadata = {
 export const viewport: Viewport = { width: "device-width", initialScale: 1 };
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  // Fetch org for authenticated users — null on public pages (login/onboarding)
   let orgName: string | null = null;
   let orgSlug: string | null = null;
   let userEmail: string | null = null;
 
   try {
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      userEmail = user.email ?? null;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { data: rawOrg } = await (supabase as any)
-        .from("orgs")
-        .select("name, slug")
-        .eq("owner_id", user.id)
-        .maybeSingle();
-      const org = rawOrg as { name: string; slug: string } | null;
+    const { userId } = await auth();
+    if (userId) {
+      const user = await currentUser();
+      userEmail = user?.emailAddresses?.[0]?.emailAddress ?? null;
+      const [org] = await db.select({ name: orgs.name, slug: orgs.slug })
+        .from(orgs)
+        .where(eq(orgs.ownerId, userId))
+        .limit(1);
       orgName = org?.name ?? null;
       orgSlug = org?.slug ?? null;
     }
   } catch {
-    // Not authenticated — public page, skip
+    // Not authenticated or DB unavailable — public page
   }
 
   const showShell = orgName !== null;
 
   return (
-    <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
-      <body>
-        {showShell ? (
-          <div className="flex h-screen overflow-hidden bg-white">
-            <Sidebar orgName={orgName!} orgSlug={orgSlug!} userEmail={userEmail} />
-            <div className="flex flex-col flex-1 overflow-hidden">
-              {children}
+    <ClerkProvider>
+      <html lang="en" className={`${inter.variable} ${jetbrainsMono.variable}`}>
+        <body>
+          {showShell ? (
+            <div className="flex h-screen overflow-hidden bg-white">
+              <Sidebar orgName={orgName!} orgSlug={orgSlug!} userEmail={userEmail} />
+              <div className="flex flex-col flex-1 overflow-hidden">
+                {children}
+              </div>
             </div>
-          </div>
-        ) : (
-          // Login / onboarding — no shell
-          <>{children}</>
-        )}
-      </body>
-    </html>
+          ) : (
+            <>{children}</>
+          )}
+        </body>
+      </html>
+    </ClerkProvider>
   );
 }

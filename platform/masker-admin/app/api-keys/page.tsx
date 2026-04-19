@@ -6,7 +6,7 @@ import { StatusChip } from "@/components/ui/StatusChip";
 import { Button } from "@/components/ui/Button";
 import { Plus, RotateCcw, Trash2, Copy, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ApiKey } from "@/lib/supabase/types";
+import type { ApiKey } from "@/lib/db/schema";
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -148,8 +148,8 @@ export default function ApiKeysPage() {
                   </div>
                 </td>
                 <td className="px-5 py-3.5 text-[#6b7280]">{k.environment}</td>
-                <td className="px-5 py-3.5 text-[#6b7280]">{k.last_used_at ? new Date(k.last_used_at).toLocaleDateString() : "Never"}</td>
-                <td className="px-5 py-3.5"><StatusChip status={k.status} /></td>
+                <td className="px-5 py-3.5 text-[#6b7280]">{k.lastUsedAt ? new Date(k.lastUsedAt).toLocaleDateString() : "Never"}</td>
+                <td className="px-5 py-3.5"><StatusChip status={k.status as never} /></td>
                 <td className="px-5 py-3.5">
                   {k.status === "active" && (
                     <div className="flex items-center gap-1.5">

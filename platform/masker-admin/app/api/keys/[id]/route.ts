@@ -1,17 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@/lib/supabase/server";
-import type { ApiKey } from "@/lib/supabase/types";
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const q = (client: ReturnType<typeof createClient>, table: string) => (client as any).from(table);
+import { getAuthedOrg } from "@/lib/auth/getOrg";
+import { db, apiKeys } from "@/lib/db";
+import { eq, and } from "drizzle-orm";
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
-  const supabase = createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const ctx = await getAuthedOrg();
+  if (!ctx) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const body = await req.json() as Partial<ApiKey>;
-  const { data, error } = await q(supabase, "api_keys").update(body).eq("id", params.id).select().single();
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
-  return NextResponse.json(data as ApiKey);
+  const body = await req.json() as { status?: string; label?: string };
+
+  const [updated] = await db.update(apiKeys)
+    .set(body)
+    .where(and(eq(apiKeys.id, params.id), eq(apiKeys.orgId, ctx.org.id)))
+    .returning();
+
+  if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
+  return NextResponse.json(updated);
 }
