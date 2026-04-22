@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/masker", "crates/masker-cli"]
+members = ["crates/masker", "crates/masker-cli", "crates/stream-privacy-engine"]
 
 [workspace.package]
 version = "0.1.0"
